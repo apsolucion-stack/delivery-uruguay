@@ -360,13 +360,18 @@ module.exports = async function handler(req, res) {
           return;
         }
         const result = await pool.query(ORDER_SELECT + " WHERE o.status = 'disponible' ORDER BY o.created_at DESC");
-        // Filtro por radio del delivery (?lat=&lng= con su ubicación actual):
-        // solo pedidos de comercios dentro de su work_radius_km. Sin ubicación
-        // del delivery o sin coordenadas del comercio, el pedido se incluye
-        // igual: nunca se oculta lo que no se puede medir.
+        // Ubicación OBLIGATORIA del delivery: sin lat/lng válidos no se
+        // muestra ningún pedido disponible. Con ubicación: solo pedidos de
+        // comercios dentro de su work_radius_km. Comercios sin coordenadas
+        // guardadas se incluyen igual (el comercio está exento): nunca se
+        // oculta lo que no se puede medir del lado del comercio.
         const dLat = toNumber(req.query.lat, null);
         const dLng = toNumber(req.query.lng, null);
         const hasDriverLoc = validCoords(dLat, dLng);
+        if (!hasDriverLoc) {
+          res.status(400).json({ error: 'Activá la ubicación para ver los pedidos dentro de tu radio' });
+          return;
+        }
         const radiusRaw = Number(user.work_radius_km);
         const radius = Number.isFinite(radiusRaw) && radiusRaw > 0 ? radiusRaw : 30;
         const rows = result.rows.filter((row) => {
@@ -476,6 +481,26 @@ module.exports = async function handler(req, res) {
       if (!user.online) {
         res.status(400).json({ error: 'Ponete en línea para aceptar pedidos' });
         return;
+      }
+      // Ubicación OBLIGATORIA para aceptar: el delivery manda su ubicación
+      // actual y el servidor verifica que el comercio esté dentro de su
+      // radio de trabajo (el radio ya no es solo un filtro del listado).
+      const aLat = toNumber(body.lat, null);
+      const aLng = toNumber(body.lng, null);
+      if (!validCoords(aLat, aLng)) {
+        res.status(400).json({ error: 'Activá la ubicación para aceptar' });
+        return;
+      }
+      // Comercio sin coordenadas guardadas: no se puede medir la distancia
+      // y el comercio está exento, así que se permite aceptar.
+      if (validCoords(order.store_lat, order.store_lng)) {
+        const radiusRaw = Number(user.work_radius_km);
+        const radius = Number.isFinite(radiusRaw) && radiusRaw > 0 ? radiusRaw : 30;
+        const km = haversineKm(aLat, aLng, Number(order.store_lat), Number(order.store_lng));
+        if (km > radius) {
+          res.status(400).json({ error: 'El comercio está fuera de tu radio de trabajo' });
+          return;
+        }
       }
       // Sin saldo prepago no se puede aceptar: hay que recargar primero.
       const driverBalance = await getBalance(pool, 'driver', user.id);
