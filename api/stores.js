@@ -15,7 +15,7 @@
 // enviar, mismo patrón que las fotos de factura de Mis Taxis: sin servicio
 // externo ni costo). Se rechazan fotos de más de 2.000.000 caracteres.
 
-const { getPool, requireAuth, readBody, toNumber, methodNotAllowed, getMontevideoNow, isStoreOpen, timeToMinutes, getBalance } = require('./_db');
+const { getPool, requireAuth, readBody, toNumber, round2, methodNotAllowed, getMontevideoNow, isStoreOpen, timeToMinutes, getBalance, haversineKm, validCoords } = require('./_db');
 
 function validTime(t) {
   if (typeof t !== 'string') return false;
@@ -39,6 +39,10 @@ function publicStore(row, now) {
     open_24h: row.open_24h,
     closed_weekdays: row.closed_weekdays,
     active: row.active,
+    paused: !!row.paused,
+    lat: row.lat !== undefined && row.lat !== null ? Number(row.lat) : null,
+    lng: row.lng !== undefined && row.lng !== null ? Number(row.lng) : null,
+    distance_km: row.distance_km !== undefined && row.distance_km !== null ? Number(row.distance_km) : null,
     avg_stars: row.avg_stars !== undefined && row.avg_stars !== null ? Number(row.avg_stars) : null,
     ratings_count: row.ratings_count !== undefined && row.ratings_count !== null ? Number(row.ratings_count) : null,
     is_open: now ? isStoreOpen(row, now) : undefined,
@@ -54,6 +58,7 @@ function publicProduct(row) {
     price: Number(row.price),
     photo: row.photo,
     active: row.active,
+    out_of_stock: !!row.out_of_stock,
     created_at: row.created_at,
   };
 }
@@ -67,9 +72,14 @@ async function getDriverPct(pool) {
 module.exports = async function handler(req, res) {
   const pool = getPool();
 
-  // % de envío público (para el cálculo del cliente antes de pedir).
+  // % de envío público (para el cálculo del cliente antes de pedir) +
+  // client ID de Google (público por diseño: solo habilita el botón).
   if (req.method === 'GET' && req.query && req.query.settings === 'public') {
-    res.status(200).json({ driver_pct: await getDriverPct(pool) });
+    const google = await pool.query("SELECT value FROM settings WHERE key = 'google_client_id'");
+    res.status(200).json({
+      driver_pct: await getDriverPct(pool),
+      google_client_id: google.rows[0] ? String(google.rows[0].value || '') : '',
+    });
     return;
   }
 
@@ -108,6 +118,10 @@ module.exports = async function handler(req, res) {
         res.status(400).json({ error: 'El comercio está cerrado ahora' });
         return;
       }
+      if (store.rows[0].paused) {
+        res.status(400).json({ error: 'El comercio está pausado temporalmente' });
+        return;
+      }
       // Sin saldo prepago, el catálogo no se ofrece (no recibe pedidos nuevos).
       const storeBalance = await getBalance(pool, 'store', storeId);
       if (!(storeBalance > 0)) {
@@ -115,7 +129,7 @@ module.exports = async function handler(req, res) {
         return;
       }
       const result = await pool.query(
-        'SELECT * FROM products WHERE store_id = $1 AND active = TRUE ORDER BY name',
+        'SELECT * FROM products WHERE store_id = $1 AND active = TRUE AND out_of_stock = FALSE ORDER BY name',
         [storeId]
       );
       res.status(200).json(result.rows.map(publicProduct));
@@ -178,13 +192,14 @@ module.exports = async function handler(req, res) {
         return;
       }
       const result = await pool.query(
-        'UPDATE products SET name = $1, description = $2, price = $3, photo = $4, active = $5 WHERE id = $6 RETURNING *',
+        'UPDATE products SET name = $1, description = $2, price = $3, photo = $4, active = $5, out_of_stock = $6 WHERE id = $7 RETURNING *',
         [
           String(body.name !== undefined ? body.name : current.rows[0].name).trim() || current.rows[0].name,
           String(body.description !== undefined ? body.description : current.rows[0].description),
           price,
           photo,
           body.active !== undefined ? body.active !== false : current.rows[0].active,
+          body.out_of_stock !== undefined ? body.out_of_stock === true : current.rows[0].out_of_stock,
           id,
         ]
       );
@@ -209,8 +224,25 @@ module.exports = async function handler(req, res) {
          WHERE s.active = TRUE
          GROUP BY s.id ORDER BY s.name`
       );
-      // Abierto ahora Y con saldo prepago > 0: sin saldo no recibe pedidos.
-      const open = result.rows.filter((row) => isStoreOpen(row, now) && Number(row.balance) > 0);
+      // Abierto ahora, con saldo prepago > 0 y NO pausado: pausado no aparece
+      // en el listado de clientes hasta reanudar (no cambia horarios ni 24h).
+      const open = result.rows.filter((row) => isStoreOpen(row, now) && Number(row.balance) > 0 && !row.paused);
+      // Con ubicación del cliente (?lat=&lng=): distancia por comercio y
+      // orden del más cercano (sin coordenadas, al final, nunca oculto).
+      const cLat = toNumber(req.query.lat, null);
+      const cLng = toNumber(req.query.lng, null);
+      if (validCoords(cLat, cLng)) {
+        open.forEach((row) => {
+          row.distance_km = validCoords(row.lat, row.lng)
+            ? round2(haversineKm(cLat, cLng, Number(row.lat), Number(row.lng)))
+            : null;
+        });
+        open.sort((a, b) => {
+          const da = a.distance_km === null ? Infinity : a.distance_km;
+          const db = b.distance_km === null ? Infinity : b.distance_km;
+          return da - db;
+        });
+      }
       res.status(200).json(open.map((row) => publicStore(row, now)));
       return;
     }
@@ -263,10 +295,16 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Horario inválido (formato HH:MM)' });
       return;
     }
+    const lat = body.lat !== undefined && body.lat !== null && body.lat !== '' ? toNumber(body.lat, null) : null;
+    const lng = body.lng !== undefined && body.lng !== null && body.lng !== '' ? toNumber(body.lng, null) : null;
+    if ((lat !== null || lng !== null) && !validCoords(lat, lng)) {
+      res.status(400).json({ error: 'Ubicación inválida' });
+      return;
+    }
     const result = await pool.query(
-      `INSERT INTO stores (user_id, name, type, address, phone, open_time, close_time, open_24h, closed_weekdays, active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE) RETURNING *`,
-      [user.id, name, String(body.type || 'otro'), String(body.address || ''), String(body.phone || user.phone || ''), openTime, closeTime, open24h, String(body.closed_weekdays || '')]
+      `INSERT INTO stores (user_id, name, type, address, phone, open_time, close_time, open_24h, closed_weekdays, active, lat, lng)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11) RETURNING *`,
+      [user.id, name, String(body.type || 'otro'), String(body.address || ''), String(body.phone || user.phone || ''), openTime, closeTime, open24h, String(body.closed_weekdays || ''), lat, lng]
     );
     res.status(201).json(publicStore(result.rows[0], getMontevideoNow()));
     return;
@@ -288,9 +326,15 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Horario inválido (formato HH:MM)' });
       return;
     }
+    const lat = body.lat !== undefined ? (body.lat === null || body.lat === '' ? null : toNumber(body.lat, null)) : current.rows[0].lat;
+    const lng = body.lng !== undefined ? (body.lng === null || body.lng === '' ? null : toNumber(body.lng, null)) : current.rows[0].lng;
+    if ((lat !== null || lng !== null) && !validCoords(lat, lng)) {
+      res.status(400).json({ error: 'Ubicación inválida' });
+      return;
+    }
     const result = await pool.query(
       `UPDATE stores SET name = $1, type = $2, address = $3, phone = $4, open_time = $5,
-       close_time = $6, open_24h = $7, closed_weekdays = $8, active = $9 WHERE id = $10 RETURNING *`,
+       close_time = $6, open_24h = $7, closed_weekdays = $8, active = $9, paused = $10, lat = $11, lng = $12 WHERE id = $13 RETURNING *`,
       [
         String(body.name !== undefined ? body.name : current.rows[0].name).trim() || current.rows[0].name,
         String(body.type !== undefined ? body.type : current.rows[0].type),
@@ -301,6 +345,9 @@ module.exports = async function handler(req, res) {
         open24h,
         String(body.closed_weekdays !== undefined ? body.closed_weekdays : current.rows[0].closed_weekdays),
         body.active !== undefined ? body.active !== false : current.rows[0].active,
+        body.paused !== undefined ? body.paused === true : current.rows[0].paused,
+        lat,
+        lng,
         current.rows[0].id,
       ]
     );

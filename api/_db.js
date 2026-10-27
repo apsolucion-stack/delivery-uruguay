@@ -26,6 +26,92 @@ function newSalt() {
   return crypto.randomBytes(16).toString('hex');
 }
 
+// Contraseñas de clientes (scrypt). Formato guardado: "sal_hex:hash_hex".
+// (Las cuentas staff usan PIN con SHA-256; los clientes usan esto.)
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return salt + ':' + derived;
+}
+
+function verifyPassword(password, stored) {
+  try {
+    if (!stored || stored.indexOf(':') === -1) return false;
+    const parts = stored.split(':');
+    const derived = crypto.scryptSync(String(password), parts[0], 64);
+    const expected = Buffer.from(parts[1], 'hex');
+    return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
+  } catch (e) {
+    return false;
+  }
+}
+
+// ---- Cédula uruguaya ----
+// Normaliza a solo dígitos y completa con ceros a la izquierda hasta 8.
+// Valida con pesos [2,9,8,7,6,3,4] sobre los 7 primeros dígitos:
+// verificador = (10 - suma % 10) % 10, debe coincidir con el 8º dígito.
+function normalizeCI(ci) {
+  const digits = String(ci || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length > 8) return digits;
+  return digits.padStart(8, '0');
+}
+
+function validateCI(ci) {
+  const digits = normalizeCI(ci);
+  if (!/^\d{8}$/.test(digits)) return false;
+  const weights = [2, 9, 8, 7, 6, 3, 4];
+  let sum = 0;
+  for (let i = 0; i < 7; i++) sum += Number(digits[i]) * weights[i];
+  const check = (10 - (sum % 10)) % 10;
+  return check === Number(digits[7]);
+}
+
+// RUT de monotributo: exactamente 12 dígitos.
+function normalizeRUT(rut) {
+  return String(rut || '').replace(/\D/g, '');
+}
+
+function validateRUT(rut) {
+  return /^\d{12}$/.test(normalizeRUT(rut));
+}
+
+// Datos de la etapa 2 del delivery que faltan para poder ponerse en línea.
+// Devuelve la lista de etiquetas pendientes (vacía = etapa 2 completa).
+function deliveryStage2Missing(row) {
+  const missing = [];
+  if (!row) return ['datos de la empresa'];
+  if (!validateRUT(row.monotributo_rut)) missing.push('RUT de monotributo (12 dígitos)');
+  if (!row.razon_social || !String(row.razon_social).trim()) missing.push('razón social');
+  if (!row.domicilio_fiscal || !String(row.domicilio_fiscal).trim()) missing.push('domicilio fiscal');
+  if (!row.actividad || !String(row.actividad).trim()) missing.push('actividad (giro)');
+  if (!row.pos_provider || !String(row.pos_provider).trim()) missing.push('proveedor de POS');
+  if (!row.pos_terminal || !String(row.pos_terminal).trim()) missing.push('terminal POS');
+  return missing;
+}
+
+// ---- Geolocalización (Haversine, sin dependencias) ----
+// Distancia en km entre dos puntos (lat/lng en grados decimales).
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const toRad = (d) => Number(d) * Math.PI / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Coordenadas válidas: números finitos dentro de los rangos terrestres.
+// null/undefined/'' NO son válidos (evita que un NULL se convierta en 0 y
+// genere distancias falsas desde el ecuador).
+function validCoords(lat, lng) {
+  if (lat === null || lat === undefined || lat === '' || lng === null || lng === undefined || lng === '') return false;
+  const la = Number(lat);
+  const ln = Number(lng);
+  return Number.isFinite(la) && Number.isFinite(ln) && la >= -90 && la <= 90 && ln >= -180 && ln <= 180;
+}
+
 function signToken(payload) {
   const secret = process.env.SESSION_SECRET || '';
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -69,7 +155,30 @@ async function requireAuth(req, res, roles) {
     return null;
   }
   const result = await getPool().query(
-    'SELECT id, name, phone, role, vehicle, monotributo_rut, pos_provider, pos_terminal, online, active FROM users WHERE id = $1',
+    'SELECT id, name, phone, role, vehicle, monotributo_rut, razon_social, nombre_fantasia, domicilio_fiscal, actividad, fecha_inicio_actividades, telefono_empresa, email_empresa, numero_bps, pos_provider, pos_terminal, work_radius_km, online, active FROM users WHERE id = $1',
+    [payload.userId]
+  );
+  const row = result.rows[0];
+  if (!row || !row.active) {
+    res.status(401).json({ error: 'No autorizado' });
+    return null;
+  }
+  return row;
+}
+
+// Auth separada para clientes (tabla customers, no users). No toca requireAuth.
+async function requireCustomerAuth(req, res) {
+  const payload = verifyToken(req);
+  if (!payload) {
+    res.status(401).json({ error: 'No autorizado' });
+    return null;
+  }
+  if (payload.role !== 'customer') {
+    res.status(403).json({ error: 'Sin permiso' });
+    return null;
+  }
+  const result = await getPool().query(
+    'SELECT id, full_name, ci, email, phone, default_address, google_sub, active, created_at FROM customers WHERE id = $1',
     [payload.userId]
   );
   const row = result.rows[0];
@@ -188,13 +297,23 @@ module.exports = {
   getPool,
   hashPin,
   newSalt,
+  hashPassword,
+  verifyPassword,
+  normalizeCI,
+  validateCI,
+  normalizeRUT,
+  validateRUT,
+  deliveryStage2Missing,
   signToken,
   verifyToken,
   requireAuth,
+  requireCustomerAuth,
   readBody,
   toNumber,
   round2,
   methodNotAllowed,
+  haversineKm,
+  validCoords,
   getMontevideoNow,
   timeToMinutes,
   parseClosedWeekdays,

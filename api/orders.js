@@ -2,30 +2,40 @@
 // POST (público): crea un pedido en un comercio ABIERTO ahora.
 //   Body: { store_id, customer_name, customer_phone, delivery_address,
 //     lines: [{ product_id, qty }], otros_text, otros_value }.
+//   Si viene token de cliente, prellena nombre/teléfono/dirección y vincula
+//   customer_id (el cliente debe tener el perfil completo); sin token el
+//   pedido es de invitado (customer_id NULL).
 //   merchandise_value = suma de líneas del catálogo (precios congelados desde
 //     la DB) + valor estimado de "otros" (0 si no viene).
 //   delivery_fee = driver_pct% × merchandise_value (snapshot con el % vigente).
 //   total = merchandise_value + delivery_fee. El pedido nace 'disponible'.
-// GET ?track=1&id= (público, sin login): seguimiento + líneas + totales
-//   (si hay confirmado, muestra el total actualizado) + teléfonos de las
-//   partes tras la aceptación + si ya se calificó cada destino.
+// GET ?track=1&id= (público, sin login): seguimiento + líneas (con item_status)
+//   + totales (si hay confirmado, muestra el total actualizado) + teléfonos de
+//   las partes tras la aceptación + si ya se calificó cada destino.
 // GET (con Bearer): admin ve todos; comercio ve los de su comercio; delivery
-//   ve los suyos + con ?available=1 los 'disponible' (solo si está en línea).
+//   ve los suyos + con ?available=1 los 'disponible' (solo si está en línea);
+//   cliente ve solo los suyos (por customer_id).
 // PUT ?id= (con Bearer): acciones { action }:
 //   accept (delivery en línea): atómico — si 0 filas, ya lo tomó otro.
-//   pickup (delivery dueño, desde 'aceptado'): { confirmed_value } — calcula
-//     la plata sobre el confirmado: ganancia = driver_pct% × confirmado,
-//     plataforma desde delivery = platform_driver_pct% × ganancia,
-//     plataforma desde comercio = store_pct% × confirmado;
-//     "Cobrar al cliente" = confirmado + ganancia.
+//   pickup (delivery dueño, desde 'aceptado'): el confirmed_value se calcula
+//     SOLO con las líneas 'levantado' del checklist (price_snapshot × qty);
+//     todas las líneas deben estar resueltas (levantado o sin_stock) y al menos
+//     una levantada. De ahí confirmed_delivery_fee, confirmed_total, ganancia
+//     y cortes. "Cobrar al cliente" = confirmado + ganancia.
 //   deliver (delivery dueño, desde 'retirado'): { collected_amount? }.
 //   cancel (admin cualquiera salvo entregado; comercio propio en
-//     disponible/aceptado; delivery propio solo en aceptado).
+//     disponible/aceptado; delivery propio solo en aceptado; motivo opcional
+//     en cancel_reason, ej. "todo sin stock").
+// PUT ?item=1&id= (delivery dueño, pedido 'aceptado'): marca una línea del
+//   checklist { item_id, status: pendiente|levantado|sin_stock }. Marcar
+//   sin_stock pone el producto en out_of_stock (el comercio lo reactiva).
+// PUT ?ready=1&id= (comercio dueño, pedido 'aceptado'): { store_ready } —
+//   "Pedido armado y listo", NO cambia el estado del pedido.
 // POST ?rate=1 (público): califica un pedido 'entregado' con 1-5 estrellas
 //   al comercio y/o al delivery, una vez por destino por pedido.
 // Los saldos de plataforma se cuentan solo sobre pedidos 'entregado'.
 
-const { getPool, requireAuth, readBody, toNumber, round2, methodNotAllowed, getMontevideoNow, isStoreOpen, getBalance } = require('./_db');
+const { getPool, requireAuth, verifyToken, readBody, toNumber, round2, methodNotAllowed, getMontevideoNow, isStoreOpen, getBalance, haversineKm, validCoords } = require('./_db');
 
 async function getSettings(pool) {
   const r = await pool.query('SELECT key, value FROM settings');
@@ -42,6 +52,7 @@ function publicOrder(row) {
     id: row.id,
     store_id: row.store_id,
     store_name: row.store_name || null,
+    customer_id: row.customer_id || null,
     customer_name: row.customer_name,
     customer_phone: row.customer_phone,
     delivery_address: row.delivery_address,
@@ -58,6 +69,9 @@ function publicOrder(row) {
     driver_name: row.driver_name || null,
     driver_phone: row.driver_phone || null,
     store_phone: row.store_phone || null,
+    distance_km: row.distance_km !== undefined && row.distance_km !== null ? Number(row.distance_km) : null,
+    store_ready: !!row.store_ready,
+    cancel_reason: row.cancel_reason || null,
     driver_earning: Number(row.driver_earning),
     platform_from_driver: Number(row.platform_from_driver),
     platform_from_store: Number(row.platform_from_store),
@@ -69,7 +83,7 @@ function publicOrder(row) {
 }
 
 const ORDER_SELECT = `
-  SELECT o.*, s.name AS store_name, s.phone AS store_phone,
+  SELECT o.*, s.name AS store_name, s.phone AS store_phone, s.lat AS store_lat, s.lng AS store_lng,
          d.name AS driver_name, d.phone AS driver_phone
   FROM orders o
   JOIN stores s ON s.id = o.store_id
@@ -126,9 +140,30 @@ module.exports = async function handler(req, res) {
   if (req.method === 'POST') {
     const body = readBody(req);
     const storeId = Number(body.store_id);
-    const customerName = String(body.customer_name || '').trim();
-    const customerPhone = String(body.customer_phone || '').trim();
-    const deliveryAddress = String(body.delivery_address || '').trim();
+    // Cliente logueado (opcional): prellena y vincula customer_id. Sin token
+    // el pedido es de invitado. Con perfil incompleto no puede pedir.
+    let customerId = null;
+    let customerProfile = null;
+    const payload = verifyToken(req);
+    if (payload && payload.role === 'customer') {
+      const c = await pool.query('SELECT * FROM customers WHERE id = $1', [payload.userId]);
+      if (c.rows[0] && c.rows[0].active) {
+        customerProfile = c.rows[0];
+        customerId = c.rows[0].id;
+        if (!(customerProfile.ci && String(customerProfile.phone || '').trim() && String(customerProfile.default_address || '').trim())) {
+          res.status(400).json({ error: 'Completá tus datos de cliente (cédula, teléfono y dirección) en Mi cuenta antes de pedir.' });
+          return;
+        }
+      }
+    }
+    let customerName = String(body.customer_name || '').trim();
+    let customerPhone = String(body.customer_phone || '').trim();
+    let deliveryAddress = String(body.delivery_address || '').trim();
+    if (customerProfile) {
+      if (!customerName) customerName = customerProfile.full_name;
+      if (!customerPhone) customerPhone = customerProfile.phone;
+      if (!deliveryAddress) deliveryAddress = customerProfile.default_address;
+    }
     const otrosText = String(body.otros_text || body.otros || '').trim();
     const otrosValue = Math.max(0, toNumber(body.otros_value, 0) || 0);
     const lines = Array.isArray(body.lines) ? body.lines : [];
@@ -148,6 +183,10 @@ module.exports = async function handler(req, res) {
     }
     if (!isStoreOpen(store.rows[0], getMontevideoNow())) {
       res.status(400).json({ error: 'El comercio está cerrado ahora' });
+      return;
+    }
+    if (store.rows[0].paused) {
+      res.status(400).json({ error: 'El comercio está pausado temporalmente' });
       return;
     }
     // Sin saldo prepago, el comercio no recibe pedidos nuevos.
@@ -188,10 +227,10 @@ module.exports = async function handler(req, res) {
     const total = round2(subtotal + deliveryFee);
     const itemsText = itemsTextParts.join('; ');
     const created = await pool.query(
-      `INSERT INTO orders (store_id, customer_name, customer_phone, delivery_address, items,
+      `INSERT INTO orders (store_id, customer_id, customer_name, customer_phone, delivery_address, items,
        merchandise_value, delivery_fee, total, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'disponible') RETURNING *`,
-      [storeId, customerName, customerPhone, deliveryAddress, itemsText, subtotal, deliveryFee, total]
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'disponible') RETURNING *`,
+      [storeId, customerId, customerName, customerPhone, deliveryAddress, itemsText, subtotal, deliveryFee, total]
     );
     for (const row of itemsRows) {
       await pool.query(
@@ -226,10 +265,12 @@ module.exports = async function handler(req, res) {
       order.driver_phone = null;
     }
     order.lines = items.rows.map((r) => ({
+      id: r.id,
       product_id: r.product_id,
       name: r.name_snapshot,
       price: Number(r.price_snapshot),
       qty: r.qty,
+      item_status: r.item_status || 'pendiente',
     }));
     order.rated_store = rated.rows.some((r) => r.target_type === 'store');
     order.rated_driver = rated.rows.some((r) => r.target_type === 'driver');
@@ -243,6 +284,27 @@ module.exports = async function handler(req, res) {
 
   // ---- Lista con Bearer ----
   if (req.method === 'GET') {
+    // Cliente: solo sus propios pedidos (por customer_id).
+    const customerPayload = verifyToken(req);
+    if (customerPayload && customerPayload.role === 'customer') {
+      const c = await pool.query('SELECT * FROM customers WHERE id = $1', [customerPayload.userId]);
+      if (!c.rows[0] || !c.rows[0].active) {
+        res.status(401).json({ error: 'No autorizado' });
+        return;
+      }
+      if (req.query && req.query.id) {
+        const one = await pool.query(ORDER_SELECT + ' WHERE o.id = $1 AND o.customer_id = $2', [Number(req.query.id), c.rows[0].id]);
+        if (!one.rows[0]) {
+          res.status(404).json({ error: 'Pedido no encontrado' });
+          return;
+        }
+        res.status(200).json(publicOrder(one.rows[0]));
+        return;
+      }
+      const mine = await pool.query(ORDER_SELECT + ' WHERE o.customer_id = $1 ORDER BY o.created_at DESC', [c.rows[0].id]);
+      res.status(200).json(mine.rows.map(publicOrder));
+      return;
+    }
     const user = await requireAuth(req, res, null);
     if (!user) return;
     if (req.query && req.query.id) {
@@ -263,7 +325,17 @@ module.exports = async function handler(req, res) {
         res.status(403).json({ error: 'Sin permiso' });
         return;
       }
-      res.status(200).json(publicOrder(row));
+      const out = publicOrder(row);
+      const lines = await pool.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id', [row.id]);
+      out.lines = lines.rows.map((r) => ({
+        id: r.id,
+        product_id: r.product_id,
+        name: r.name_snapshot,
+        price: Number(r.price_snapshot),
+        qty: r.qty,
+        item_status: r.item_status || 'pendiente',
+      }));
+      res.status(200).json(out);
       return;
     }
     if (user.role === 'admin') {
@@ -288,7 +360,30 @@ module.exports = async function handler(req, res) {
           return;
         }
         const result = await pool.query(ORDER_SELECT + " WHERE o.status = 'disponible' ORDER BY o.created_at DESC");
-        res.status(200).json(result.rows.map(publicOrder));
+        // Filtro por radio del delivery (?lat=&lng= con su ubicación actual):
+        // solo pedidos de comercios dentro de su work_radius_km. Sin ubicación
+        // del delivery o sin coordenadas del comercio, el pedido se incluye
+        // igual: nunca se oculta lo que no se puede medir.
+        const dLat = toNumber(req.query.lat, null);
+        const dLng = toNumber(req.query.lng, null);
+        const hasDriverLoc = validCoords(dLat, dLng);
+        const radiusRaw = Number(user.work_radius_km);
+        const radius = Number.isFinite(radiusRaw) && radiusRaw > 0 ? radiusRaw : 30;
+        const rows = result.rows.filter((row) => {
+          if (!hasDriverLoc) return true;
+          if (!validCoords(row.store_lat, row.store_lng)) return true;
+          const km = haversineKm(dLat, dLng, Number(row.store_lat), Number(row.store_lng));
+          row.distance_km = round2(km);
+          return km <= radius;
+        });
+        if (hasDriverLoc) {
+          rows.sort((a, b) => {
+            const da = a.distance_km !== undefined ? a.distance_km : Infinity;
+            const db = b.distance_km !== undefined ? b.distance_km : Infinity;
+            return da - db;
+          });
+        }
+        res.status(200).json(rows.map(publicOrder));
         return;
       }
       const result = await pool.query(ORDER_SELECT + ' WHERE o.driver_id = $1 ORDER BY o.created_at DESC', [user.id]);
@@ -315,6 +410,63 @@ module.exports = async function handler(req, res) {
       return;
     }
     const order = current.rows[0];
+
+    // Marcar una línea del checklist (delivery dueño, pedido 'aceptado').
+    if (req.query.item === '1') {
+      if (user.role !== 'delivery' || order.driver_id !== user.id || order.status !== 'aceptado') {
+        res.status(403).json({ error: 'Sin permiso o estado incorrecto' });
+        return;
+      }
+      const itemId = Number(body.item_id);
+      const status = String(body.status || '');
+      if (!itemId || ['pendiente', 'levantado', 'sin_stock'].indexOf(status) === -1) {
+        res.status(400).json({ error: 'Ítem o estado inválido' });
+        return;
+      }
+      const line = await pool.query('SELECT * FROM order_items WHERE id = $1 AND order_id = $2', [itemId, id]);
+      if (!line.rows[0]) {
+        res.status(404).json({ error: 'Ítem no encontrado en este pedido' });
+        return;
+      }
+      const updated = await pool.query(
+        'UPDATE order_items SET item_status = $1 WHERE id = $2 RETURNING *',
+        [status, itemId]
+      );
+      // Sin stock: el producto queda flagged hasta que el comercio lo reactive.
+      if (status === 'sin_stock' && line.rows[0].product_id) {
+        await pool.query('UPDATE products SET out_of_stock = TRUE WHERE id = $1', [line.rows[0].product_id]);
+      }
+      res.status(200).json({
+        id: updated.rows[0].id,
+        product_id: updated.rows[0].product_id,
+        name: updated.rows[0].name_snapshot,
+        price: Number(updated.rows[0].price_snapshot),
+        qty: updated.rows[0].qty,
+        item_status: updated.rows[0].item_status,
+      });
+      return;
+    }
+
+    // "Pedido armado y listo" (comercio dueño, pedido 'aceptado').
+    if (req.query.ready === '1') {
+      if (user.role !== 'comercio') {
+        res.status(403).json({ error: 'Sin permiso' });
+        return;
+      }
+      const store = await pool.query('SELECT id FROM stores WHERE user_id = $1', [user.id]);
+      if (!store.rows[0] || store.rows[0].id !== order.store_id || order.status !== 'aceptado') {
+        res.status(403).json({ error: 'Sin permiso o estado incorrecto' });
+        return;
+      }
+      const full = await pool.query(
+        'UPDATE orders SET store_ready = $1 WHERE id = $2 RETURNING *',
+        [body.store_ready === true, id]
+      );
+      const out = await pool.query(ORDER_SELECT + ' WHERE o.id = $1', [id]);
+      void full;
+      res.status(200).json(publicOrder(out.rows[0]));
+      return;
+    }
 
     if (action === 'accept') {
       if (user.role !== 'delivery') {
@@ -350,11 +502,39 @@ module.exports = async function handler(req, res) {
         res.status(403).json({ error: 'Sin permiso o estado incorrecto' });
         return;
       }
-      const confirmed = toNumber(body.confirmed_value, null);
-      if (confirmed === null || confirmed <= 0) {
-        res.status(400).json({ error: 'Indicá el monto real pagado en el comercio' });
+      // El confirmado se calcula SOLO con las líneas 'levantado' del checklist.
+      // Todas las líneas deben estar resueltas y al menos una levantada.
+      const lines = await pool.query('SELECT * FROM order_items WHERE order_id = $1', [id]);
+      if (lines.rows.some((l) => (l.item_status || 'pendiente') === 'pendiente')) {
+        res.status(400).json({ error: 'Marcá todos los ítems como levantados o sin stock antes de confirmar el retiro' });
         return;
       }
+      const lifted = lines.rows.filter((l) => l.item_status === 'levantado');
+      if (!lifted.length) {
+        res.status(400).json({ error: 'No hay ítems levantados: marcá al menos uno o cancelá el pedido si todo está sin stock' });
+        return;
+      }
+      // Precio real de "otros": el delivery indica cuánto pagó por cada línea
+      // "otros" levantada (sin producto). Sin un precio mayor que 0 no se puede
+      // confirmar, para no confirmar $0 por un "otros" sin valor estimado.
+      const itemPrices = body.item_prices && typeof body.item_prices === 'object' ? body.item_prices : {};
+      for (const l of lifted) {
+        if (l.product_id === null || l.product_id === undefined) {
+          const raw = itemPrices[String(l.id)];
+          const price = raw !== undefined && raw !== null && raw !== '' ? toNumber(raw, null) : null;
+          const effective = price !== null ? price : Number(l.price_snapshot);
+          if (!(effective > 0)) {
+            res.status(400).json({ error: 'Indicá cuánto pagaste por "' + l.name_snapshot + '" antes de confirmar el retiro' });
+            return;
+          }
+          if (price !== null && round2(price) !== Number(l.price_snapshot)) {
+            await pool.query('UPDATE order_items SET price_snapshot = $1 WHERE id = $2 AND order_id = $3 AND product_id IS NULL', [round2(price), l.id, id]);
+          }
+        }
+      }
+      const lines2 = await pool.query('SELECT * FROM order_items WHERE order_id = $1', [id]);
+      const lifted2 = lines2.rows.filter((l) => l.item_status === 'levantado');
+      const confirmed = round2(lifted2.reduce((sum, l) => sum + Number(l.price_snapshot) * l.qty, 0));
       const settings = await getSettings(pool);
       const confirmedFee = round2((settings.driver_pct / 100) * confirmed);
       const confirmedTotal = round2(confirmed + confirmedFee);
@@ -425,7 +605,8 @@ module.exports = async function handler(req, res) {
         res.status(403).json({ error: 'No se puede cancelar este pedido en su estado actual' });
         return;
       }
-      await pool.query("UPDATE orders SET status = 'cancelado' WHERE id = $1", [id]);
+      const reason = String(body.reason || body.cancel_reason || '').trim();
+      await pool.query('UPDATE orders SET status = $1, cancel_reason = $2 WHERE id = $3', ['cancelado', reason === '' ? null : reason, id]);
       const full = await pool.query(ORDER_SELECT + ' WHERE o.id = $1', [id]);
       res.status(200).json(publicOrder(full.rows[0]));
       return;
