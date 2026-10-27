@@ -227,10 +227,16 @@ module.exports = async function handler(req, res) {
       // Abierto ahora, con saldo prepago > 0 y NO pausado: pausado no aparece
       // en el listado de clientes hasta reanudar (no cambia horarios ni 24h).
       const open = result.rows.filter((row) => isStoreOpen(row, now) && Number(row.balance) > 0 && !row.paused);
-      // Con ubicación del cliente (?lat=&lng=): distancia por comercio y
-      // orden del más cercano (sin coordenadas, al final, nunca oculto).
+      // Ubicación OBLIGATORIA del cliente: sin lat/lng válidos no se muestra
+      // el listado. Con ubicación: distancia por comercio y orden del más
+      // cercano (comercios sin coordenadas guardadas van al final, nunca se
+      // ocultan: el comercio está exento de geolocalización en vivo).
       const cLat = toNumber(req.query.lat, null);
       const cLng = toNumber(req.query.lng, null);
+      if (!validCoords(cLat, cLng)) {
+        res.status(400).json({ error: 'Activá la ubicación para ver los comercios cercanos' });
+        return;
+      }
       if (validCoords(cLat, cLng)) {
         open.forEach((row) => {
           row.distance_km = validCoords(row.lat, row.lng)
