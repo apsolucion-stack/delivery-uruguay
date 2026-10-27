@@ -21,13 +21,26 @@
 
   <!-- Vista pública principal -->
   <section id="home-view">
-    <h2>Pedí lo que necesites, a cualquier hora</h2>
-    <p>Si hay un comercio abierto a las 2 de la mañana y estás en una fiesta, pedís bebida, limones o lo que sea desde acá. Un delivery activo lo acepta, paga en el comercio y te lo lleva. Le pagás directo al delivery cuando lo recibís.</p>
-    <div class="actions">
-      <button type="button" data-nav="stores">Ver comercios abiertos y pedir</button>
-      <button type="button" data-nav="track">Seguir mi pedido</button>
-      <button type="button" data-nav="login">Ingresar (comercio / delivery / admin)</button>
-      <button type="button" data-nav="register">Registrarme</button>
+    <div class="hero">
+      <h1 class="hero-title">Delivery Uruguay</h1>
+      <p class="hero-subtitle">Supermercados, almacenes y mercadería a tu puerta, a cualquier hora.</p>
+      <p class="hero-support">Pedís desde la app, un delivery lo retira en el comercio y te lo cobra al llegar.</p>
+      <button type="button" class="big" data-nav="stores">Pedir en comercios abiertos</button>
+      <div class="action-grid">
+        <button type="button" class="action-card" data-nav="track">Seguir mi pedido</button>
+        <button type="button" class="action-card" data-nav="login">Ingresar</button>
+        <button type="button" class="action-card" data-nav="customer-register">Crear cuenta</button>
+      </div>
+      <div class="benefits">
+        <span>Comercios abiertos ahora</span>
+        <span>Pagás cuando lo recibís</span>
+        <span>Seguimiento de tu pedido</span>
+      </div>
+      <div class="home-secondary">
+        <button type="button" class="link-button" data-nav="customer-login">Ingresar como cliente</button>
+        <button type="button" class="link-button" data-nav="register">Registrarme (comercio / delivery)</button>
+        <button type="button" class="link-button" data-nav="owner-login">Acceso dueño</button>
+      </div>
     </div>
   </section>
 
@@ -73,13 +86,12 @@
   <!-- Ingreso -->
   <section id="login-view" class="hidden">
     <h2>Ingresar</h2>
-    <p>Solo con PIN, sin email.</p>
+    <p>Solo con PIN, sin email. Para comercios y deliveries.</p>
     <form id="login-form">
       <label>Soy
         <select id="login-role" required>
           <option value="delivery">Delivery</option>
           <option value="comercio">Comercio</option>
-          <option value="admin">Admin</option>
         </select>
       </label>
       <label>Nombre <input id="login-name" type="text" required></label>
@@ -88,12 +100,68 @@
     </form>
     <p id="login-error" class="error hidden"></p>
     <p><button type="button" data-nav="register">No tengo cuenta: registrarme</button></p>
+    <p><button type="button" data-nav="customer-login">Soy cliente: ingresar como cliente</button></p>
+    <p><button type="button" data-nav="owner-login" class="secondary">Acceso dueño</button></p>
+    <p><button type="button" data-nav="home">Volver</button></p>
+  </section>
+
+  <!-- Acceso dueño (solo admin, solo nombre + PIN) -->
+  <section id="owner-login-view" class="hidden">
+    <h2>Acceso dueño</h2>
+    <p>Solo para el dueño de la plataforma. Sin selector de rol: solo nombre y PIN de una cuenta de dueño.</p>
+    <form id="owner-login-form">
+      <label>Nombre <input id="owner-name" type="text" required></label>
+      <label>PIN <input id="owner-pin" type="password" inputmode="numeric" required></label>
+      <button type="submit">Entrar como dueño</button>
+    </form>
+    <p id="owner-login-error" class="error hidden"></p>
+    <p><button type="button" data-nav="home">Volver</button></p>
+  </section>
+
+  <!-- Registro de cliente -->
+  <section id="customer-register-view" class="hidden">
+    <h2>Registrarme como cliente</h2>
+    <p>Con tu cuenta podés ver tu historial de pedidos y pedir con tus datos ya cargados. También podés seguir pidiendo sin cuenta, como invitado.</p>
+    <form id="customer-register-form">
+      <label>Nombre completo <input id="cust-reg-name" type="text" required></label>
+      <label>Cédula de identidad <input id="cust-reg-ci" type="text" inputmode="numeric" placeholder="8 dígitos, sin puntos ni guiones" required></label>
+      <label>Email <input id="cust-reg-email" type="email" required></label>
+      <label>Teléfono <input id="cust-reg-phone" type="text" required></label>
+      <label>Dirección de entrega <input id="cust-reg-address" type="text" required></label>
+      <label>Contraseña (mínimo 6 caracteres) <input id="cust-reg-password" type="password" required></label>
+      <button type="submit">Crear mi cuenta</button>
+    </form>
+    <div id="google-register-box" class="hidden">
+      <p class="hint">O continuá con Google:</p>
+      <div id="google-register-btn"></div>
+    </div>
+    <p id="customer-register-error" class="error hidden"></p>
+    <p id="customer-register-ok" class="ok hidden"></p>
+    <p><button type="button" data-nav="customer-login">Ya tengo cuenta: ingresar como cliente</button></p>
+    <p><button type="button" data-nav="home">Volver</button></p>
+  </section>
+
+  <!-- Ingreso de cliente -->
+  <section id="customer-login-view" class="hidden">
+    <h2>Ingresar como cliente</h2>
+    <form id="customer-login-form">
+      <label>Email <input id="cust-login-email" type="email" required></label>
+      <label>Contraseña <input id="cust-login-password" type="password" required></label>
+      <button type="submit">Entrar</button>
+    </form>
+    <div id="google-login-box" class="hidden">
+      <p class="hint">O continuá con Google:</p>
+      <div id="google-login-btn"></div>
+    </div>
+    <p id="customer-login-error" class="error hidden"></p>
+    <p><button type="button" data-nav="customer-register">No tengo cuenta: registrarme como cliente</button></p>
     <p><button type="button" data-nav="home">Volver</button></p>
   </section>
 
   <!-- Registro -->
   <section id="register-view" class="hidden">
     <h2>Registrarme</h2>
+    <p>Primero creás tu cuenta con nombre, teléfono, PIN y vehículo. Si sos delivery, después desde tu perfil completás los datos de tu empresa y tu POS para poder ponerte en línea.</p>
     <form id="register-form">
       <label>Soy
         <select id="reg-role" required>
@@ -106,16 +174,13 @@
       <label>PIN (mínimo 4 caracteres) <input id="reg-pin" type="password" inputmode="numeric" required></label>
       <div id="delivery-fields">
         <label>Vehículo
-          <select id="reg-vehicle">
+          <select id="reg-vehicle" required>
             <option value="moto">Moto</option>
             <option value="bici">Bici</option>
             <option value="auto">Auto</option>
           </select>
         </label>
-        <label>RUT de monotributo <input id="reg-rut" type="text"></label>
-        <label>Proveedor de POS <input id="reg-pos-provider" type="text" placeholder="Ej.: Mercado Pago Point, Geocom, Fiserv"></label>
-        <label>Terminal POS <input id="reg-pos-terminal" type="text" placeholder="N° de terminal o identificador"></label>
-        <p class="hint">Para trabajar como delivery tenés que tener POS: los pagos con tarjeta van a tu propia cuenta a través de tu POS, vinculado a tu empresa monotributo. Sin datos de POS no se puede completar el registro ni ponerse en línea.</p>
+        <p class="hint">Los datos de tu empresa unipersonal (RUT, razón social, domicilio fiscal, actividad) y tu POS los completás después desde tu perfil. Sin esos datos completos no vas a poder ponerte en línea ni recibir pedidos.</p>
       </div>
       <button type="submit">Crear cuenta</button>
     </form>

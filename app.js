@@ -1,5 +1,7 @@
 // Delivery Uruguay — app de una sola página (JavaScript sin compilación).
-// Roles: admin, comercio, delivery (ingreso con PIN). Los clientes piden sin login.
+// Roles staff: admin (solo por Acceso dueño), comercio, delivery (ingreso con
+// PIN). Clientes: cuenta propia con email + contraseña o Google. Los clientes
+// también pueden pedir sin login (invitados).
 // Moneda: $U. Horarios: America/Montevideo (el filtro de abiertos lo hace la API).
 
 (function () {
@@ -10,6 +12,9 @@ var user = null;
 try { user = JSON.parse(localStorage.getItem('du_user') || 'null'); } catch (e) { user = null; }
 
 var loginView = document.getElementById('login-view');
+var ownerLoginView = document.getElementById('owner-login-view');
+var customerLoginView = document.getElementById('customer-login-view');
+var customerRegisterView = document.getElementById('customer-register-view');
 var registerView = document.getElementById('register-view');
 var homeView = document.getElementById('home-view');
 var storesView = document.getElementById('stores-view');
@@ -27,6 +32,8 @@ var currentStore = null;
 var currentCatalog = [];
 var cart = {};
 var driverPct = 0;
+var googleClientId = '';
+var googleScriptLoading = false;
 
 function esc(s) {
   return String(s === null || s === undefined ? '' : s)
@@ -41,6 +48,66 @@ function money(n) {
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
+
+// Cédula uruguaya — MISMA función que el backend (api/_db.js validateCI):
+// solo dígitos, 8 dígitos (con ceros a la izquierda si hace falta), pesos
+// [2,9,8,7,6,3,4] sobre los 7 primeros, verificador = (10 - suma%10) % 10.
+function validateCI(ci) {
+  var digits = String(ci || '').replace(/\D/g, '');
+  if (!digits) return false;
+  if (digits.length <= 8) {
+    while (digits.length < 8) digits = '0' + digits;
+  }
+  if (!/^\d{8}$/.test(digits)) return false;
+  var weights = [2, 9, 8, 7, 6, 3, 4];
+  var sum = 0;
+  for (var i = 0; i < 7; i++) sum += Number(digits[i]) * weights[i];
+  var check = (10 - (sum % 10)) % 10;
+  return check === Number(digits[7]);
+}
+
+// Teléfonos uruguayos para WhatsApp y llamadas: solo dígitos, se saca el
+// 0 inicial y se agrega el prefijo 598 si no lo tiene (ej. 099123456 ->
+// 59899123456; 59899123456 queda igual).
+function normalizeUYPhone(phone) {
+  var d = String(phone || '').replace(/[^0-9]/g, '');
+  if (!d) return '';
+  if (d.indexOf('598') === 0) return d;
+  if (d.charAt(0) === '0') d = d.slice(1);
+  return '598' + d;
+}
+
+// Links con un toque: WhatsApp (wa.me) y llamada (tel:).
+function phoneLinks(phone) {
+  var n = normalizeUYPhone(phone);
+  if (!n) return '';
+  return '<a href="https://wa.me/' + n + '">WhatsApp</a> · <a href="tel:+' + n + '">Llamar</a>';
+}
+
+// Distancia legible: menos de 1 km se muestra en metros.
+function fmtKm(km) {
+  var n = Number(km);
+  if (!Number.isFinite(n)) return '';
+  if (n < 1) return Math.round(n * 1000) + ' m';
+  return n.toFixed(1) + ' km';
+}
+
+// Geolocalización del navegador: NUNCA rechaza; null = sin permiso, sin
+// soporte o error. El flujo sigue igual (sin filtrar, mostrando todo).
+function getPosition() {
+  return new Promise(function (resolve) {
+    if (!navigator.geolocation) { resolve(null); return; }
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+    }, function () { resolve(null); }, { timeout: 10000, maximumAge: 60000 });
+  });
+}
+
+// Ubicaciones en memoria de esta sesión: la del cliente (para cercanía de
+// comercios) y la del delivery (para filtrar por radio). Nunca se guardan
+// en la base: se mandan solo como parámetros de cada consulta.
+var customerLoc = null;
+var driverLoc = null;
 
 function showMessage(text, kind) {
   messageEl.textContent = text || '';
@@ -91,6 +158,9 @@ function hideAllViews() {
   catalogView.classList.add('hidden');
   trackView.classList.add('hidden');
   loginView.classList.add('hidden');
+  ownerLoginView.classList.add('hidden');
+  customerLoginView.classList.add('hidden');
+  customerRegisterView.classList.add('hidden');
   registerView.classList.add('hidden');
   appView.classList.add('hidden');
 }
@@ -102,9 +172,17 @@ function showView(name) {
   if (name === 'catalog') catalogView.classList.remove('hidden');
   if (name === 'track') trackView.classList.remove('hidden');
   if (name === 'login') loginView.classList.remove('hidden');
+  if (name === 'owner-login') ownerLoginView.classList.remove('hidden');
+  if (name === 'customer-login') { customerLoginView.classList.remove('hidden'); initGoogleButtons(); }
+  if (name === 'customer-register') { customerRegisterView.classList.remove('hidden'); initGoogleButtons(); }
   if (name === 'register') registerView.classList.remove('hidden');
   if (name === 'app') { appView.classList.remove('hidden'); }
   window.scrollTo(0, 0);
+}
+
+function roleLabel(role) {
+  var map = { admin: 'dueño', comercio: 'comercio', delivery: 'delivery', customer: 'cliente' };
+  return map[role] || role;
 }
 
 function showLogin() {
@@ -114,11 +192,12 @@ function showLogin() {
 
 function showApp() {
   userBar.classList.remove('hidden');
-  userNameEl.textContent = user.name + ' (' + user.role + ')';
+  userNameEl.textContent = user.name + ' (' + roleLabel(user.role) + ')';
   showView('app');
   if (!currentTab) {
     currentTab = user.role === 'admin' ? 'admin-stores' :
-      user.role === 'comercio' ? 'store' : 'availability';
+      user.role === 'comercio' ? 'store' :
+      user.role === 'customer' ? 'customer-account' : 'availability';
   }
   buildTabs();
 }
@@ -182,8 +261,14 @@ async function loadOpenStores() {
   try {
     var settings = await api('/api/stores?settings=public');
     driverPct = Number(settings.driver_pct || 0);
-    var stores = await api('/api/stores?open=1');
-    metaEl.innerHTML = 'Hora en Montevideo: <strong>' + esc(montevideoTimeText()) + '</strong> · Envío: <strong>' + driverPct + '%</strong> de la mercadería (se cobra al recibir). Solo se muestran comercios abiertos ahora.';
+    googleClientId = settings.google_client_id || '';
+    var url = '/api/stores?open=1';
+    if (customerLoc) url += '&lat=' + encodeURIComponent(customerLoc.lat) + '&lng=' + encodeURIComponent(customerLoc.lng);
+    var stores = await api(url);
+    metaEl.innerHTML = 'Hora en Montevideo: <strong>' + esc(montevideoTimeText()) + '</strong> · Envío: <strong>' + driverPct + '%</strong> de la mercadería (se cobra al recibir). Solo se muestran comercios abiertos ahora.' +
+      (customerLoc
+        ? ' <br>Ordenados del más cercano. <button type="button" class="secondary" onclick="useCustomerLocation()">Actualizar mi ubicación</button>'
+        : ' <button type="button" class="secondary" onclick="useCustomerLocation()">Usar mi ubicación para ver cercanía</button>');
     if (!stores.length) {
       listEl.innerHTML = '<p>No hay comercios abiertos en este momento. Probá más tarde.</p>';
       return;
@@ -192,6 +277,7 @@ async function loadOpenStores() {
       return '<div class="card">' +
         '<h3>' + esc(s.name) + '</h3>' +
         '<p>' + esc(s.type) + ' · ' + esc(s.address) + '</p>' +
+        (s.distance_km !== null && s.distance_km !== undefined ? '<p>A <strong>' + fmtKm(s.distance_km) + '</strong> de vos</p>' : '') +
         '<p>' + starsText(s.avg_stars, s.ratings_count) + '</p>' +
         '<p>Horario: ' + (s.open_24h ? 'Abierto 24 horas' : esc(s.open_time) + ' – ' + esc(s.close_time)) + '</p>' +
         '<button type="button" onclick="openCatalog(' + s.id + ')">Ver catálogo y pedir</button>' +
@@ -200,6 +286,41 @@ async function loadOpenStores() {
   } catch (e) {
     listEl.innerHTML = '<p class="error">' + esc(e.message) + '</p>';
   }
+}
+
+async function useCustomerLocation() {
+  var pos = await getPosition();
+  if (!pos) {
+    showMessage('No se pudo obtener tu ubicación (permiso negado o sin GPS). Se muestran todos los comercios.', 'error');
+    return;
+  }
+  customerLoc = pos;
+  showMessage('Ubicación activa: comercios ordenados del más cercano.', 'ok');
+  loadOpenStores();
+}
+
+async function useDriverLocation() {
+  var pos = await getPosition();
+  if (!pos) {
+    showMessage('No se pudo obtener tu ubicación (permiso negado o sin GPS). Se muestran todos los pedidos.', 'error');
+    return;
+  }
+  driverLoc = pos;
+  showMessage('Ubicación activa: solo ves pedidos dentro de tu radio.', 'ok');
+  renderTab();
+}
+
+async function useStoreLocation() {
+  var pos = await getPosition();
+  var statusEl = document.getElementById('store-loc-status');
+  if (!pos) {
+    showMessage('No se pudo obtener tu ubicación (permiso negado o sin GPS).', 'error');
+    return;
+  }
+  document.getElementById('store-lat').value = pos.lat;
+  document.getElementById('store-lng').value = pos.lng;
+  if (statusEl) statusEl.textContent = 'Ubicación lista para guardar: ' + pos.lat.toFixed(5) + ', ' + pos.lng.toFixed(5) + ' (guardá el formulario).';
+  showMessage('Ubicación capturada. Guardá el formulario para aplicarla.', 'ok');
 }
 
 async function openCatalog(storeId) {
@@ -211,12 +332,19 @@ async function openCatalog(storeId) {
     }
     var settings = await api('/api/stores?settings=public');
     driverPct = Number(settings.driver_pct || 0);
+    googleClientId = settings.google_client_id || '';
     var products = await api('/api/stores?products=1&store_id=' + encodeURIComponent(storeId));
     var openStores = await api('/api/stores?open=1');
     var storeWithRating = openStores.find(function (s) { return s.id === store.id; });
     currentStore = store;
     currentCatalog = products;
     cart = {};
+    // Cliente logueado: prellenar sus datos en el checkout.
+    if (user && user.role === 'customer') {
+      document.getElementById('cust-name').value = user.name || '';
+      document.getElementById('cust-phone').value = user.phone || '';
+      document.getElementById('cust-address').value = user.default_address || '';
+    }
     document.getElementById('catalog-header').innerHTML =
       '<h2>' + esc(store.name) + '</h2>' +
       '<p>' + esc(store.type) + ' · ' + esc(store.address) + ' · ' + esc(store.phone) + '</p>' +
@@ -341,15 +469,26 @@ async function loadTrack(orderId) {
     var html = '<div class="card">' +
       '<h3>Pedido #' + order.id + ' — ' + esc(order.store_name) + '</h3>' +
       '<p><span class="status ' + esc(order.status) + '">' + esc(statusLabel(order.status)) + '</span></p>' +
-      '<p>' + esc(order.items) + '</p>' +
+      '<p>' + esc(order.items) + '</p>';
+    if (order.lines && order.lines.length) {
+      html += '<ul>' + order.lines.map(function (l) {
+        var badge = l.item_status === 'sin_stock' ? ' <span class="badge badge-cancelado">Sin stock</span>' :
+          l.item_status === 'levantado' ? ' <span class="badge badge-entregado">Levantado</span>' : '';
+        return '<li>' + l.qty + 'x ' + esc(l.name) + ' (' + money(l.price) + ' c/u)' + badge + '</li>';
+      }).join('') + '</ul>';
+    }
+    if (order.status === 'cancelado' && order.cancel_reason) {
+      html += '<p class="error">Motivo: ' + esc(order.cancel_reason) + '</p>';
+    }
+    html +=
       '<p>Entrega en: ' + esc(order.delivery_address) + '</p>' +
       '<p>Subtotal mercadería: <strong>' + money(order.merchandise_vigente) + '</strong></p>' +
       '<p>Envío: <strong>' + money(order.delivery_fee_vigente) + '</strong></p>' +
       '<p>TOTAL a pagar al delivery: <strong>' + money(order.total_vigente) + '</strong>' +
       (order.confirmed_total !== null ? ' (actualizado al confirmar el delivery)' : '') + '</p>';
     if (order.status !== 'disponible') {
-      html += '<p>Delivery: ' + esc(order.driver_name || '') + (order.driver_phone ? ' · <a href="https://wa.me/' + esc(order.driver_phone.replace(/[^0-9]/g, '')) + '">WhatsApp</a>' : '') + '</p>';
-      html += '<p>Comercio: ' + esc(order.store_phone || '') + '</p>';
+      html += '<p>Delivery: ' + esc(order.driver_name || '') + (order.driver_phone ? ' · ' + phoneLinks(order.driver_phone) : '') + '</p>';
+      html += '<p>Comercio: ' + esc(order.store_phone || '') + (order.store_phone ? ' · ' + phoneLinks(order.store_phone) : '') + '</p>';
     }
     html += '</div>';
     if (order.status === 'entregado' && (!order.rated_store || !order.rated_driver)) {
@@ -408,9 +547,11 @@ function adminTabs() {
   return [
     { id: 'admin-stores', label: 'Comercios' },
     { id: 'admin-drivers', label: 'Deliveries' },
+    { id: 'admin-customers', label: 'Clientes' },
     { id: 'admin-orders', label: 'Pedidos' },
     { id: 'admin-settings', label: 'Ajustes' },
     { id: 'admin-balances', label: 'Saldos y créditos' },
+    { id: 'admin-reports', label: 'Reportes' },
     { id: 'pin', label: 'Mi PIN' },
   ];
 }
@@ -435,8 +576,15 @@ function driverTabs() {
   ];
 }
 
+function customerTabs() {
+  return [
+    { id: 'customer-account', label: 'Mi cuenta' },
+    { id: 'customer-orders', label: 'Mis pedidos' },
+  ];
+}
+
 function buildTabs() {
-  var tabs = user.role === 'admin' ? adminTabs() : user.role === 'comercio' ? comercioTabs() : driverTabs();
+  var tabs = user.role === 'admin' ? adminTabs() : user.role === 'comercio' ? comercioTabs() : user.role === 'customer' ? customerTabs() : driverTabs();
   tabsEl.innerHTML = tabs.map(function (t) {
     return '<button type="button" class="' + (t.id === currentTab ? 'active' : '') + '" onclick="switchTab(\'' + t.id + '\')">' + esc(t.label) + '</button>';
   }).join('');
@@ -453,16 +601,18 @@ function orderCard(o, actions) {
     '<h3>Pedido #' + o.id + ' — ' + esc(o.store_name || '') + '</h3>' +
     '<p><span class="status ' + esc(o.status) + '">' + esc(statusLabel(o.status)) + '</span></p>' +
     '<p>' + esc(o.items) + '</p>' +
-    '<p>Cliente: ' + esc(o.customer_name) + ' · ' + esc(o.customer_phone) + '</p>' +
+    (user && user.role === 'delivery' && o.status === 'disponible' ? '' : '<p>Cliente: ' + esc(o.customer_name) + (o.customer_phone ? ' · ' + phoneLinks(o.customer_phone) : '') + '</p>') +
     '<p>Entrega en: ' + esc(o.delivery_address) + '</p>' +
     '<p>Mercadería: ' + money(o.confirmed_value !== null ? o.confirmed_value : o.merchandise_value) +
     ' · Envío: ' + money(o.confirmed_delivery_fee !== null ? o.confirmed_delivery_fee : o.delivery_fee) +
     ' · Total: <strong>' + money(o.confirmed_total !== null ? o.confirmed_total : o.total) + '</strong></p>';
-  if (o.driver_name) html += '<p>Delivery: ' + esc(o.driver_name) + '</p>';
+  if (o.driver_name) html += '<p>Delivery: ' + esc(o.driver_name) + (o.driver_phone && o.status !== 'disponible' ? ' · ' + phoneLinks(o.driver_phone) : '') + '</p>';
+  if (o.distance_km !== null && o.distance_km !== undefined) html += '<p>Distancia al comercio: <strong>' + fmtKm(o.distance_km) + '</strong></p>';
+  if (o.store_ready) html += '<p class="ok">✓ El comercio ya lo tiene armado y listo.</p>';
   if (o.status === 'aceptado' && user.role === 'delivery') {
     html += '<p><strong>Pagar en comercio: ' + money(o.merchandise_value) + ' (estimado)</strong></p>' +
-      '<label>Monto real pagado en el comercio ($U) <input data-field="confirmed" type="number" min="0" step="0.01"></label>' +
-      '<button type="button" onclick="doPickup(' + o.id + ', this)">Ya tengo la orden</button>';
+      '<p class="hint">Antes de retirar, marcá cada ítem en el checklist: lo que levantás y lo que está sin stock. El total a cobrar se calcula solo con lo levantado. Para ítems "otros", indicá cuánto pagaste.</p>' +
+      '<button type="button" class="big" onclick="openChecklist(' + o.id + ')">Checklist de retiro</button>';
   }
   if (o.status === 'retirado' && user.role === 'delivery') {
     html += '<p><strong>Cobrar al cliente: ' + money(o.confirmed_total) + '</strong> (mercadería ' + money(o.confirmed_value) + ' + envío ' + money(o.confirmed_delivery_fee) + ')</p>' +
@@ -479,9 +629,11 @@ function renderTab() {
   var fn = {
     'admin-stores': renderAdminStores,
     'admin-drivers': renderAdminDrivers,
+    'admin-customers': renderAdminCustomers,
     'admin-orders': renderAdminOrders,
     'admin-settings': renderAdminSettings,
     'admin-balances': renderAdminBalances,
+    'admin-reports': renderAdminReports,
     'store': renderStoreForm,
     'catalog-mine': renderCatalogMine,
     'my-orders': renderMyOrders,
@@ -490,6 +642,8 @@ function renderTab() {
     'available': renderAvailable,
     'my-deliveries': renderMyDeliveries,
     'profile': renderProfile,
+    'customer-account': renderCustomerAccount,
+    'customer-orders': renderCustomerOrders,
     'pin': renderPin,
   }[currentTab];
   if (fn) fn().catch(function (err) { contentEl.innerHTML = '<p class="error">' + esc(err.message) + '</p>'; });
@@ -522,12 +676,88 @@ async function renderAdminDrivers() {
   if (!drivers.length) { contentEl.innerHTML = '<p>No hay deliveries todavía.</p>'; return; }
   contentEl.innerHTML = drivers.map(function (d) {
     return '<div class="card"><h3>' + esc(d.name) + '</h3>' +
-      '<p>Tel: ' + esc(d.phone) + ' · Vehículo: ' + esc(d.vehicle || '') + ' · RUT: ' + esc(d.monotributo_rut || '') + '</p>' +
+      '<p>Tel: ' + esc(d.phone) + ' · Vehículo: ' + esc(d.vehicle || '') + '</p>' +
+      '<p>RUT: ' + esc(d.monotributo_rut || '—') + ' · Razón social: ' + esc(d.razon_social || '—') + '</p>' +
       '<p>POS: ' + esc(d.pos_provider || '') + ' · ' + esc(d.pos_terminal || '') + '</p>' +
       '<p>En línea: ' + (d.online ? 'Sí' : 'No') + ' · Activo: ' + (d.active ? 'Sí' : 'No') + '</p>' +
       '<button type="button" onclick="toggleUserActive(' + d.id + ', true)">Reactivar</button>' +
       '<button type="button" onclick="toggleUserActive(' + d.id + ', false)">Suspender</button></div>';
   }).join('');
+}
+
+async function renderAdminCustomers() {
+  var customers = await api('/api/admin?customers=1');
+  if (!customers.length) { contentEl.innerHTML = '<p>No hay clientes registrados todavía. Los invitados aparecen en sus pedidos, no acá.</p>'; return; }
+  contentEl.innerHTML = customers.map(function (c) {
+    return '<div class="card"><h3>' + esc(c.full_name) + '</h3>' +
+      '<p>CI: ' + esc(c.ci || '—') + ' · Email: ' + esc(c.email) + ' · Tel: ' + esc(c.phone) + '</p>' +
+      '<p>Dirección: ' + esc(c.default_address || '—') + ' · Google: ' + (c.google_linked ? 'Sí' : 'No') + ' · Activo: ' + (c.active ? 'Sí' : 'No') + '</p>' +
+      '<button type="button" onclick="toggleCustomerActive(' + c.id + ', true)">Reactivar</button>' +
+      '<button type="button" onclick="toggleCustomerActive(' + c.id + ', false)">Suspender</button></div>';
+  }).join('');
+}
+
+async function toggleCustomerActive(customerId, active) {
+  try {
+    await api('/api/admin?customers=1&id=' + encodeURIComponent(customerId), 'PUT', { active: active });
+    showMessage(active ? 'Cliente reactivado.' : 'Cliente suspendido.', 'ok');
+    renderTab();
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
+}
+
+async function renderAdminReports() {
+  var stores = await api('/api/stores');
+  var drivers = await api('/api/users?role=delivery');
+  var today = new Date().toISOString().slice(0, 10);
+  var from = new Date(Date.now() - 29 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  contentEl.innerHTML = '<div class="card"><h3>Reportes</h3>' +
+    '<label>Desde <input id="rep-from" type="date" value="' + from + '"></label>' +
+    '<label>Hasta <input id="rep-to" type="date" value="' + today + '"></label>' +
+    '<label>Comercio <select id="rep-store"><option value="">Todos</option>' + stores.map(function (s) { return '<option value="' + s.id + '">' + esc(s.name) + '</option>'; }).join('') + '</select></label>' +
+    '<label>Delivery <select id="rep-driver"><option value="">Todos</option>' + drivers.map(function (d) { return '<option value="' + d.id + '">' + esc(d.name) + '</option>'; }).join('') + '</select></label>' +
+    '<button type="button" class="big" onclick="loadReports()">Ver reportes</button></div>' +
+    '<div id="reports-box"></div>';
+  loadReports();
+}
+
+async function loadReports() {
+  var box = document.getElementById('reports-box');
+  if (!box) return;
+  box.innerHTML = 'Cargando…';
+  var from = document.getElementById('rep-from').value;
+  var to = document.getElementById('rep-to').value;
+  var storeId = document.getElementById('rep-store').value;
+  var driverId = document.getElementById('rep-driver').value;
+  try {
+    var q = '/api/admin?reports=1&from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to);
+    if (storeId) q += '&store_id=' + encodeURIComponent(storeId);
+    if (driverId) q += '&driver_id=' + encodeURIComponent(driverId);
+    var r = await api(q);
+    var t = r.totals;
+    var html = '<div class="card"><h3>Totales del período (' + esc(r.from) + ' a ' + esc(r.to) + ')</h3>' +
+      '<p>Pedidos entregados: <strong>' + t.delivered_count + '</strong></p>' +
+      '<p>Mercadería total: <strong>' + money(t.merchandise) + '</strong></p>' +
+      '<p>Envíos totales: <strong>' + money(t.delivery_fees) + '</strong></p>' +
+      '<p>Ganancia total de deliveries: <strong>' + money(t.driver_earnings) + '</strong></p>' +
+      '<p>Corte plataforma desde deliveries: <strong>' + money(t.platform_from_driver) + '</strong></p>' +
+      '<p>Corte plataforma desde comercios: <strong>' + money(t.platform_from_store) + '</strong></p>' +
+      '<p>Créditos cargados: <strong>' + money(t.credits_loaded) + '</strong></p>' +
+      '<p>Créditos descontados: <strong>' + money(t.credits_deducted) + '</strong></p></div>';
+    html += '<h3>Por comercio</h3>' + (r.by_store.length ? r.by_store.map(function (s) {
+      return '<div class="card"><p><strong>' + esc(s.name) + '</strong> — ' + s.orders + ' pedidos · mercadería ' + money(s.merchandise) + ' · corte ' + money(s.platform_cut) + '</p></div>';
+    }).join('') : '<p>Sin datos.</p>');
+    html += '<h3>Por delivery</h3>' + (r.by_driver.length ? r.by_driver.map(function (d) {
+      return '<div class="card"><p><strong>' + esc(d.name) + '</strong> — ' + d.orders + ' pedidos · mercadería ' + money(d.merchandise) + ' · ganancia ' + money(d.earnings) + ' · corte ' + money(d.platform_cut) + '</p></div>';
+    }).join('') : '<p>Sin datos.</p>');
+    html += '<h3>Pedidos del período</h3>' + (r.orders.length ? r.orders.map(function (o) {
+      return '<div class="card"><p><strong>Pedido #' + o.id + '</strong> — ' + esc(o.store_name) + ' · ' + esc(o.customer_name) + ' · <span class="status ' + esc(o.status) + '">' + esc(statusLabel(o.status)) + '</span> · total ' + money(o.total) + '</p></div>';
+    }).join('') : '<p>Sin pedidos en el período.</p>');
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = '<p class="error">' + esc(e.message) + '</p>';
+  }
 }
 
 async function toggleUserActive(userId, active) {
@@ -555,6 +785,8 @@ async function renderAdminSettings() {
     '<label>% de la ganancia del delivery para la plataforma <input id="set-platform-driver-pct" type="number" min="0" max="100" step="0.1" value="' + s.platform_driver_pct + '"></label>' +
     '<label>% de la venta del comercio para la plataforma <input id="set-store-pct" type="number" min="0" max="100" step="0.1" value="' + s.store_pct + '"></label>' +
     '<label>Umbral de poco saldo ($U) <input id="set-threshold" type="number" min="0" step="1" value="' + s.low_balance_threshold + '"></label>' +
+    '<label>ID de cliente de Google (para "Continuar con Google"; vacío = desactivado) <input id="set-google-id" type="text" value="' + esc(s.google_client_id || '') + '" placeholder="xxxx.apps.googleusercontent.com"></label>' +
+    '<p class="hint">El ID se crea gratis en Google Cloud Console (ver README). Es público por diseño: solo habilita el botón de Google.</p>' +
     '<button type="button" onclick="saveSettings()">Guardar ajustes</button></div>';
 }
 
@@ -565,6 +797,7 @@ async function saveSettings() {
       platform_driver_pct: Number(document.getElementById('set-platform-driver-pct').value),
       store_pct: Number(document.getElementById('set-store-pct').value),
       low_balance_threshold: Number(document.getElementById('set-threshold').value),
+      google_client_id: document.getElementById('set-google-id').value.trim(),
     });
     showMessage('Ajustes guardados.', 'ok');
     renderTab();
@@ -642,7 +875,13 @@ async function renderStoreForm() {
     '</select></label>' +
     '<label>Dirección <input id="store-address" type="text" value="' + esc(store ? store.address : '') + '"></label>' +
     '<label>Teléfono <input id="store-phone" type="text" value="' + esc(store ? store.phone : '') + '"></label>' +
+    '<p id="store-loc-status">' + (store && store.lat !== null && store.lat !== undefined && store.lng !== null && store.lng !== undefined ? 'Ubicación guardada: ' + esc(Number(store.lat).toFixed(5)) + ', ' + esc(Number(store.lng).toFixed(5)) : 'Sin ubicación guardada: guardala para que los deliveries te encuentren por cercanía.') + '</p>' +
+    '<p><button type="button" class="secondary" onclick="useStoreLocation()">Usar mi ubicación actual</button></p>' +
+    '<input id="store-lat" type="hidden" value="' + (store && store.lat !== null && store.lat !== undefined ? esc(store.lat) : '') + '">' +
+    '<input id="store-lng" type="hidden" value="' + (store && store.lng !== null && store.lng !== undefined ? esc(store.lng) : '') + '">' +
     '<label><input id="store-24h" type="checkbox"' + (store && store.open_24h ? ' checked' : '') + '> Abierto 24 horas</label>' +
+    (store ? '<label><input id="store-paused" type="checkbox"' + (store.paused ? ' checked' : '') + '> Pausar tienda temporalmente (no aparecés en comercios abiertos hasta reanudar)</label>' +
+    (store.paused ? '<p class="warning">Tu tienda está pausada: no aparecés en el listado de clientes.</p>' : '') : '') +
     '<label>Abre <input id="store-open" type="time" value="' + esc(store ? store.open_time : '09:00') + '"></label>' +
     '<label>Cierra <input id="store-close" type="time" value="' + esc(store ? store.close_time : '18:00') + '"></label>' +
     '<p>Si cierra antes de abrir (ej. abre 20:00 y cierra 04:00), el horario cruza la medianoche y el comercio aparece abierto de madrugada.</p>' +
@@ -665,6 +904,9 @@ async function saveStore(isEdit) {
     open_time: document.getElementById('store-open').value,
     close_time: document.getElementById('store-close').value,
     closed_weekdays: closed.join(','),
+    paused: document.getElementById('store-paused') ? document.getElementById('store-paused').checked : undefined,
+    lat: document.getElementById('store-lat') ? (document.getElementById('store-lat').value === '' ? null : Number(document.getElementById('store-lat').value)) : undefined,
+    lng: document.getElementById('store-lng') ? (document.getElementById('store-lng').value === '' ? null : Number(document.getElementById('store-lng').value)) : undefined,
   };
   try {
     if (isEdit) await api('/api/stores', 'PUT', body);
@@ -696,10 +938,11 @@ async function renderCatalogMine() {
   html += products.length ? products.map(function (p) {
     return '<div class="card">' +
       (p.photo ? '<img class="product-photo" src="' + p.photo + '" alt="">' : '') +
-      '<h3>' + esc(p.name) + ' — ' + money(p.price) + (p.active ? '' : ' (inactivo)') + '</h3>' +
+      '<h3>' + esc(p.name) + ' — ' + money(p.price) + (p.active ? '' : ' (inactivo)') + (p.out_of_stock ? ' <span class="badge badge-cancelado">Sin stock</span>' : '') + '</h3>' +
       '<p>' + esc(p.description || '') + '</p>' +
       '<button type="button" onclick="editProduct(' + p.id + ')">Editar</button>' +
-      '<button type="button" onclick="toggleProduct(' + p.id + ',' + (p.active ? 'false' : 'true') + ')">' + (p.active ? 'Desactivar' : 'Activar') + '</button></div>';
+      '<button type="button" onclick="toggleProduct(' + p.id + ',' + (p.active ? 'false' : 'true') + ')">' + (p.active ? 'Desactivar' : 'Activar') + '</button>' +
+      (p.out_of_stock ? '<button type="button" onclick="restockProduct(' + p.id + ')">Volver a poner en stock</button>' : '') + '</div>';
   }).join('') : '<p>Todavía no tenés productos. Agregá el primero arriba.</p>';
   contentEl.innerHTML = html;
 }
@@ -751,10 +994,49 @@ async function toggleProduct(productId, active) {
   }
 }
 
+async function restockProduct(productId) {
+  try {
+    await api('/api/stores?products=1&id=' + productId, 'PUT', { out_of_stock: false });
+    showMessage('Producto de nuevo en stock: ya aparece en el catálogo.', 'ok');
+    renderTab();
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
+}
+
 async function renderMyOrders() {
   var orders = await api('/api/orders');
   if (!orders.length) { contentEl.innerHTML = '<p>No tenés pedidos todavía.</p>'; return; }
-  contentEl.innerHTML = orders.map(function (o) {
+  var html = '';
+  // Aviso destacado al comercio: órdenes aceptadas, en camino, para armar ya.
+  if (user.role === 'comercio') {
+    var accepted = orders.filter(function (o) { return o.status === 'aceptado'; });
+    if (accepted.length) {
+      var details = await Promise.all(accepted.map(function (o) {
+        return api('/api/orders?id=' + encodeURIComponent(o.id)).catch(function () { return null; });
+      }));
+      html += '<div class="notice"><h3>🚨 Órdenes en camino — armalas ahora</h3>' +
+        '<p>Estos pedidos ya tienen delivery asignado en camino. Armá los ítems y marcá "Pedido armado y listo".</p></div>';
+      details.forEach(function (d, i) {
+        if (!d) return;
+        var o = accepted[i];
+        var linesHtml = (d.lines || []).map(function (l) {
+          return '<li>' + l.qty + 'x ' + esc(l.name) + '</li>';
+        }).join('');
+        html += '<div class="card notice-card"><h3>Pedido #' + d.id + ' — ' + esc(d.customer_name) + '</h3>' +
+          '<p>Cliente: ' + esc(d.customer_name) + (d.customer_phone ? ' · ' + phoneLinks(d.customer_phone) : '') + '</p>' +
+          '<p>Entrega en: ' + esc(d.delivery_address) + '</p>' +
+          '<p>Delivery: ' + esc(d.driver_name || '') + (d.driver_phone ? ' · ' + phoneLinks(d.driver_phone) : '') + '</p>' +
+          '<p>Aceptado: ' + esc(d.accepted_at ? new Date(d.accepted_at).toLocaleString('es-UY') : '') + '</p>' +
+          '<ul>' + linesHtml + '</ul>' +
+          (d.store_ready
+            ? '<p class="ok">✓ Marcado como armado y listo.</p>'
+            : '<button type="button" class="big" onclick="markStoreReady(' + d.id + ')">Pedido armado y listo</button>') +
+          '</div>';
+      });
+    }
+  }
+  html += orders.map(function (o) {
     return orderCard(o, function (x) {
       if (x.status === 'disponible' || x.status === 'aceptado') {
         return '<button type="button" onclick="cancelOrder(' + x.id + ')">Cancelar pedido</button>';
@@ -762,6 +1044,17 @@ async function renderMyOrders() {
       return '';
     });
   }).join('');
+  contentEl.innerHTML = html;
+}
+
+async function markStoreReady(orderId) {
+  try {
+    await api('/api/orders?ready=1&id=' + encodeURIComponent(orderId), 'PUT', { store_ready: true });
+    showMessage('Pedido marcado como armado y listo. El delivery ya lo ve.', 'ok');
+    renderTab();
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
 }
 
 async function renderMyBalance() {
@@ -777,6 +1070,7 @@ async function renderMyBalance() {
 }
 
 async function cancelOrder(orderId) {
+  if (!window.confirm('¿Seguro que querés cancelar este pedido? Esta acción no se puede deshacer.')) return;
   try {
     await api('/api/orders?id=' + encodeURIComponent(orderId), 'PUT', { action: 'cancel' });
     showMessage('Pedido cancelado.', 'ok');
@@ -797,6 +1091,10 @@ window.cancelProductEdit = cancelProductEdit;
 window.saveProduct = saveProduct;
 window.toggleProduct = toggleProduct;
 window.cancelOrder = cancelOrder;
+window.useCustomerLocation = useCustomerLocation;
+window.useDriverLocation = useDriverLocation;
+window.useStoreLocation = useStoreLocation;
+window.saveRadius = saveRadius;
 
 // ---- Delivery ----
 async function renderAvailability() {
@@ -805,12 +1103,22 @@ async function renderAvailability() {
   localStorage.setItem('du_user', JSON.stringify(user));
   var html = '';
   if (me.balance !== undefined) html += lowBalanceWarning(me.balance, me.low_threshold);
+  if (me.stage2_complete === false) {
+    html += '<div class="notice"><h3>Completá los datos de tu empresa para empezar a recibir pedidos</h3>' +
+      '<p>Te falta: ' + esc((me.stage2_missing || []).join(', ')) + '</p>' +
+      '<button type="button" class="big" onclick="goToProfile()">Completar etapa 2</button></div>';
+  }
   html += '<div class="card"><h3>¿Estás trabajando?</h3>' +
     '<p>Estado actual: <strong>' + (me.online ? 'EN LÍNEA — recibís pedidos disponibles' : 'DESCONECTADO — no recibís pedidos') + '</strong></p>' +
     '<button type="button" class="big ' + (me.online ? 'offline' : 'online') + '" onclick="toggleOnline()">' +
     (me.online ? 'Dejar de trabajar' : 'Empezar a trabajar') + '</button>' +
-    '<p class="hint">Para ponerte en línea tenés que tener POS registrado. Sin saldo de créditos no podés aceptar pedidos.</p></div>';
+    '<p class="hint">Para ponerte en línea tenés que tener los datos de tu empresa y tu POS completos. Sin saldo de créditos no podés aceptar pedidos.</p></div>';
   contentEl.innerHTML = html;
+}
+
+function goToProfile() {
+  currentTab = 'profile';
+  buildTabs();
 }
 
 async function toggleOnline() {
@@ -832,11 +1140,21 @@ async function renderAvailable() {
     contentEl.innerHTML = '<p>Estás desconectado. Ponete en línea en "Disponibilidad" para ver pedidos disponibles.</p>';
     return;
   }
-  var orders = await api('/api/orders?available=1');
-  if (!orders.length) { contentEl.innerHTML = '<p>No hay pedidos disponibles ahora mismo.</p>'; return; }
-  contentEl.innerHTML = orders.map(function (o) {
+  var radius = me.work_radius_km !== undefined && me.work_radius_km !== null ? me.work_radius_km : 30;
+  var url = '/api/orders?available=1';
+  if (driverLoc) url += '&lat=' + encodeURIComponent(driverLoc.lat) + '&lng=' + encodeURIComponent(driverLoc.lng);
+  var orders = await api(url);
+  var head = '<div class="card"><h3>Pedidos disponibles</h3>' +
+    '<p>Tu radio de trabajo: <strong>' + esc(radius) + ' km</strong> (se cambia en "Mi perfil").</p>' +
+    (driverLoc
+      ? '<p>Ubicación activa: solo ves pedidos de comercios a menos de ' + esc(radius) + ' km. <button type="button" class="secondary" onclick="useDriverLocation()">Actualizar mi ubicación</button></p>'
+      : '<p>Sin ubicación: se muestran todos los pedidos. <button type="button" onclick="useDriverLocation()">Usar mi ubicación para filtrar por radio</button></p>') +
+    '</div>';
+  if (!orders.length) { contentEl.innerHTML = head + '<p>No hay pedidos disponibles ahora mismo.</p>'; return; }
+  contentEl.innerHTML = head + orders.map(function (o) {
     return orderCard(o, function (x) {
-      return '<button type="button" class="big" onclick="acceptOrder(' + x.id + ')">Aceptar esta entrega</button>';
+      return '<p><strong>Tu ganancia: ' + money(x.delivery_fee) + '</strong> · Total a cobrar al cliente: <strong>' + money(x.total) + '</strong></p>' +
+        '<button type="button" class="big" onclick="acceptOrder(' + x.id + ')">Aceptar esta entrega</button>';
     });
   }).join('');
 }
@@ -852,18 +1170,169 @@ async function acceptOrder(orderId) {
   }
 }
 
-async function doPickup(orderId, btn) {
-  var card = btn.closest('.card');
-  var input = card ? card.querySelector('input[data-field="confirmed"]') : null;
-  var value = input ? Number(input.value) : NaN;
-  if (!value || value <= 0) {
-    showMessage('Indicá el monto real pagado en el comercio.', 'error');
-    return;
+// ---- Cliente ----
+async function renderCustomerAccount() {
+  var me = await api('/api/users?customer=me');
+  var html = '';
+  if (!me.profile_complete) {
+    html += '<div class="notice"><h3>Completá tus datos para poder pedir</h3>' +
+      '<p>Faltan tu cédula, teléfono o dirección. Con el perfil completo podés pedir con tus datos ya cargados.</p></div>';
   }
+  html += '<div class="card"><h3>Mi cuenta</h3>' +
+    '<label>Nombre completo <input id="ca-name" type="text" value="' + esc(me.full_name) + '"></label>' +
+    '<label>Cédula de identidad ' + (me.ci
+      ? '<input type="text" value="' + esc(me.ci) + '" disabled><span class="hint">La cédula no se puede cambiar.</span>'
+      : '<input id="ca-ci" type="text" inputmode="numeric" placeholder="8 dígitos, sin puntos ni guiones" required>') + '</label>' +
+    '<label>Email <input type="email" value="' + esc(me.email) + '" disabled></label>' +
+    '<label>Teléfono <input id="ca-phone" type="text" value="' + esc(me.phone) + '"></label>' +
+    '<label>Dirección de entrega <input id="ca-address" type="text" value="' + esc(me.default_address || '') + '"></label>' +
+    '<label>Contraseña nueva (opcional, mínimo 6 caracteres) <input id="ca-password" type="password"></label>' +
+    '<button type="button" class="big" onclick="saveCustomerAccount()">Guardar cambios</button></div>';
+  html += '<p><button type="button" onclick="switchTab(\'customer-orders\')">Ver mis pedidos</button></p>';
+  contentEl.innerHTML = html;
+}
+
+async function saveCustomerAccount() {
+  var body = {
+    full_name: document.getElementById('ca-name').value.trim(),
+    phone: document.getElementById('ca-phone').value.trim(),
+    default_address: document.getElementById('ca-address').value.trim(),
+  };
+  var ciEl = document.getElementById('ca-ci');
+  if (ciEl) {
+    if (!validateCI(ciEl.value.trim())) {
+      showMessage('La cédula no es válida (8 dígitos con dígito verificador).', 'error');
+      return;
+    }
+    body.ci = ciEl.value.trim();
+  }
+  var pw = document.getElementById('ca-password').value;
+  if (pw) body.password = pw;
   try {
-    var updated = await api('/api/orders?id=' + encodeURIComponent(orderId), 'PUT', { action: 'pickup', confirmed_value: value });
-    showMessage('¡Ya tenés la orden! Cobrá al cliente ' + money(updated.confirmed_total) + ' al entregar.', 'ok');
+    var updated = await api('/api/users?customer=me', 'PUT', body);
+    user.name = updated.full_name;
+    user.phone = updated.phone;
+    user.default_address = updated.default_address;
+    user.profile_complete = updated.profile_complete;
+    localStorage.setItem('du_user', JSON.stringify(user));
+    showMessage(updated.profile_complete ? 'Datos guardados. Ya podés pedir.' : 'Datos guardados. Todavía falta completar tu perfil.', updated.profile_complete ? 'ok' : 'error');
     renderTab();
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
+}
+
+async function renderCustomerOrders() {
+  var me = await api('/api/users?customer=me');
+  if (!me.orders.length) { contentEl.innerHTML = '<p>Todavía no hiciste pedidos. Cuando pidas, acá vas a ver tu historial.</p>'; return; }
+  contentEl.innerHTML = me.orders.map(function (o) {
+    var full = {
+      id: o.id, store_name: o.store_name, status: o.status, items: o.items,
+      customer_name: me.full_name, customer_phone: me.phone, delivery_address: '',
+      merchandise_value: o.merchandise_value, delivery_fee: o.delivery_fee, total: o.total,
+      confirmed_value: null, confirmed_delivery_fee: null, confirmed_total: o.confirmed_total,
+      driver_name: null,
+    };
+    return orderCard(full, function (x) {
+      return '<button type="button" onclick="loadTrack(' + x.id + ')">Ver seguimiento</button>';
+    });
+  }).join('');
+}
+
+// ---- Checklist de retiro (delivery) ----
+async function openChecklist(orderId) {
+  contentEl.innerHTML = 'Cargando checklist…';
+  try {
+    var o = await api('/api/orders?id=' + encodeURIComponent(orderId));
+    renderChecklistView(o);
+  } catch (e) {
+    contentEl.innerHTML = '<p class="error">' + esc(e.message) + '</p>';
+  }
+}
+
+function renderChecklistView(o) {
+  var lines = o.lines || [];
+  window._checklistLines = lines;
+  var lifted = lines.filter(function (l) { return l.item_status === 'levantado'; });
+  var liftedTotal = lifted.reduce(function (s, l) { return round2(s + Number(l.price) * l.qty); }, 0);
+  var allResolved = lines.length > 0 && lines.every(function (l) { return l.item_status !== 'pendiente'; });
+  var allOut = lines.length > 0 && lines.every(function (l) { return l.item_status === 'sin_stock'; });
+  var html = '<div class="card"><h3>Checklist de retiro — Pedido #' + o.id + ' — ' + esc(o.store_name || '') + '</h3>' +
+    '<p>Cliente: ' + esc(o.customer_name) + ' · Entrega en: ' + esc(o.delivery_address) + '</p>' +
+    (o.store_ready ? '<p class="ok">✓ El comercio ya lo tiene armado y listo.</p>' : '<p class="hint">El comercio todavía no lo marcó como armado.</p>') +
+    '</div>';
+  html += lines.map(function (l) {
+    var badge = l.item_status === 'sin_stock' ? '<span class="badge badge-cancelado">Sin stock</span>' :
+      l.item_status === 'levantado' ? '<span class="badge badge-entregado">Levantado</span>' :
+      '<span class="badge badge-disponible">Pendiente</span>';
+    return '<div class="card"><h3>' + l.qty + 'x ' + esc(l.name) + ' — ' + money(l.price) + ' c/u ' + badge + '</h3>' +
+      '<button type="button" onclick="setItemStatus(' + o.id + ',' + l.id + ',\'levantado\')">✓ Levantado</button> ' +
+      '<button type="button" onclick="setItemStatus(' + o.id + ',' + l.id + ',\'sin_stock\')">Sin stock</button> ' +
+      '<button type="button" class="secondary" onclick="setItemStatus(' + o.id + ',' + l.id + ',\'pendiente\')">Volver a pendiente</button></div>';
+  }).join('');
+  var otrosInputs = lines.filter(function (l) { return l.item_status === 'levantado' && (l.product_id === null || l.product_id === undefined); }).map(function (l) {
+    return '<label>¿Cuánto pagaste por ' + esc(l.name) + '? $U <input type="number" min="0" step="1" id="otros-price-' + l.id + '" value="' + l.price + '" oninput="recalcChecklistTotal()"></label>';
+  }).join('');
+  html += '<div class="card"><h3>Resumen</h3>' +
+    (otrosInputs ? '<p>Precio pagado por ítems "otros" (sin producto de catálogo):</p>' + otrosInputs : '') +
+    '<p>Total confirmado con lo levantado: <strong id="checklist-total">' + money(liftedTotal) + '</strong> (solo ítems levantados; lo sin stock no cuenta).</p>' +
+    (!allResolved ? '<p class="warning">Marcá todos los ítems antes de confirmar el retiro.</p>' : '') +
+    '<button type="button" class="big" onclick="doPickup(' + o.id + ')">Ya tengo la orden</button>' +
+    (allOut ? '<button type="button" onclick="cancelAllOutOfStock(' + o.id + ')">Cancelar pedido (todo sin stock)</button>' : '') +
+    '<p><button type="button" class="secondary" onclick="renderTab()">Volver a mis entregas</button></p></div>';
+  contentEl.innerHTML = html;
+}
+
+function recalcChecklistTotal() {
+  var lines = window._checklistLines || [];
+  var total = 0;
+  lines.forEach(function (l) {
+    if (l.item_status !== 'levantado') return;
+    var price = Number(l.price);
+    if (l.product_id === null || l.product_id === undefined) {
+      var inp = document.getElementById('otros-price-' + l.id);
+      if (inp) price = Number(inp.value || 0) || 0;
+    }
+    total = round2(total + price * l.qty);
+  });
+  var el = document.getElementById('checklist-total');
+  if (el) el.textContent = money(total);
+}
+
+async function setItemStatus(orderId, itemId, status) {
+  try {
+    await api('/api/orders?item=1&id=' + encodeURIComponent(orderId), 'PUT', { item_id: itemId, status: status });
+    openChecklist(orderId);
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
+}
+
+async function doPickup(orderId) {
+  try {
+    var prices = {};
+    (window._checklistLines || []).forEach(function (l) {
+      if (l.item_status === 'levantado' && (l.product_id === null || l.product_id === undefined)) {
+        var inp = document.getElementById('otros-price-' + l.id);
+        if (inp) prices[l.id] = Number(inp.value || 0) || 0;
+      }
+    });
+    var updated = await api('/api/orders?id=' + encodeURIComponent(orderId), 'PUT', { action: 'pickup', item_prices: prices });
+    showMessage('¡Ya tenés la orden! Cobrá al cliente ' + money(updated.confirmed_total) + ' al entregar.', 'ok');
+    currentTab = 'my-deliveries';
+    buildTabs();
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
+}
+
+async function cancelAllOutOfStock(orderId) {
+  if (!window.confirm('¿Seguro que querés cancelar el pedido? Todos los ítems están sin stock y el cliente verá ese motivo.')) return;
+  try {
+    await api('/api/orders?id=' + encodeURIComponent(orderId), 'PUT', { action: 'cancel', reason: 'Todo sin stock' });
+    showMessage('Pedido cancelado: todo sin stock. El cliente lo ve cancelado con ese motivo.', 'ok');
+    currentTab = 'my-deliveries';
+    buildTabs();
   } catch (e) {
     showMessage(e.message, 'error');
   }
@@ -895,6 +1364,11 @@ async function renderMyDeliveries() {
   }).join('');
 }
 
+function fmtDate(v) {
+  if (!v) return '';
+  return String(v).slice(0, 10);
+}
+
 async function renderProfile() {
   var me = await api('/api/users?me=1');
   var rows = await api('/api/users?movements=1');
@@ -902,11 +1376,89 @@ async function renderProfile() {
     '<p>Tel: ' + esc(me.phone) + ' · Vehículo: ' + esc(me.vehicle || '') + ' · RUT: ' + esc(me.monotributo_rut || '') + '</p>' +
     '<p>POS: ' + esc(me.pos_provider || '') + ' · ' + esc(me.pos_terminal || '') + '</p>' +
     '<p>Calificación: ' + starsText(me.avg_stars, me.ratings_count) + '</p></div>';
+  if (me.role === 'delivery') {
+    if (me.stage2_complete) {
+      html += '<p class="ok">✓ Datos de tu empresa completos: podés ponerte en línea y recibir pedidos.</p>';
+    } else {
+      html += '<div class="notice"><h3>Completá los datos de tu empresa para empezar a recibir pedidos</h3>' +
+        '<p>Te falta: ' + esc((me.stage2_missing || []).join(', ')) + '</p>' +
+        '<p>Sin estos datos no podés ponerte en línea.</p></div>';
+    }
+    html += '<div class="card"><h3>Etapa 2: datos de mi empresa unipersonal</h3>' +
+      '<p class="hint">Los marcados con * son obligatorios para ponerte en línea. Los demás son opcionales.</p>' +
+      '<label>RUT de monotributo (12 dígitos) * <input id="s2-rut" type="text" inputmode="numeric" value="' + esc(me.monotributo_rut || '') + '"></label>' +
+      '<label>Razón social * <input id="s2-razon" type="text" value="' + esc(me.razon_social || '') + '"></label>' +
+      '<label>Nombre de fantasía <input id="s2-fantasia" type="text" value="' + esc(me.nombre_fantasia || '') + '"></label>' +
+      '<label>Domicilio fiscal * <input id="s2-domicilio" type="text" value="' + esc(me.domicilio_fiscal || '') + '"></label>' +
+      '<label>Actividad (giro) * <input id="s2-actividad" type="text" placeholder="Ej.: Reparto de mercaderías" value="' + esc(me.actividad || '') + '"></label>' +
+      '<label>Fecha de inicio de actividades <input id="s2-fecha" type="date" value="' + fmtDate(me.fecha_inicio_actividades) + '"></label>' +
+      '<label>Teléfono de la empresa <input id="s2-tel-emp" type="text" value="' + esc(me.telefono_empresa || '') + '"></label>' +
+      '<label>Email de la empresa <input id="s2-email-emp" type="email" value="' + esc(me.email_empresa || '') + '"></label>' +
+      '<label>Nº de empresa BPS <input id="s2-bps" type="text" value="' + esc(me.numero_bps || '') + '"></label>' +
+      '<label>Proveedor de POS * <input id="s2-pos-prov" type="text" placeholder="Ej.: Mercado Pago Point, Getnet" value="' + esc(me.pos_provider || '') + '"></label>' +
+      '<label>Terminal POS * <input id="s2-pos-term" type="text" value="' + esc(me.pos_terminal || '') + '"></label>' +
+      '<label>Teléfono personal <input id="s2-phone" type="text" value="' + esc(me.phone || '') + '"></label>' +
+      '<label>Vehículo <select id="s2-vehicle"><option value="moto"' + (me.vehicle === 'moto' ? ' selected' : '') + '>Moto</option><option value="bici"' + (me.vehicle === 'bici' ? ' selected' : '') + '>Bici</option><option value="auto"' + (me.vehicle === 'auto' ? ' selected' : '') + '>Auto</option></select></label>' +
+      '<button type="button" class="big" onclick="saveStage2()">Guardar datos de mi empresa</button></div>';
+    html += '<div class="card"><h3>Radio de trabajo</h3>' +
+      '<p>Solo ves pedidos de comercios dentro de este radio, medido desde tu ubicación cuando abrís "Disponibles". Sin ubicación, ves todos los pedidos.</p>' +
+      '<label>Radio de trabajo (km) <input id="s2-radius" type="number" min="1" max="200" step="1" value="' + esc(me.work_radius_km !== undefined && me.work_radius_km !== null ? me.work_radius_km : 30) + '"></label>' +
+      '<button type="button" onclick="saveRadius()">Guardar radio</button></div>';
+    html += '<div class="card"><h3>Cómo empezar</h3>' +
+      '<h4>💼 Abrir tu empresa lo más barato posible</h4>' +
+      '<p>El monotributo es el régimen más barato para arrancar como unipersonal. El trámite se hace en DGI (para el RUT) y en BPS (alta de empresa) y se puede iniciar en línea. Los costos y requisitos exactos cambian: confirmalos en dgi.gub.uy, bps.gub.uy o con un contador antes de arrancar.</p>' +
+      '<h4>📟 Conseguir tu POS</h4>' +
+      '<p>Se pide online a proveedores como Mercado Pago Point, Getnet u otros. Muchos lectores básicos no tienen alquiler mensual. Tiene que quedar vinculado a la cuenta de tu propia empresa unipersonal: consultá las condiciones de cada proveedor antes de elegir.</p>' +
+      '<p class="hint">Estos son consejos generales, no un trámite exacto: verificá siempre en las fuentes oficiales.</p></div>';
+  }
   if (me.balance !== undefined) html += lowBalanceWarning(me.balance, me.low_threshold);
   html += '<h3>Movimientos de créditos</h3>' + (rows.length ? rows.map(function (r) {
     return '<div class="card"><p>' + esc(new Date(r.created_at).toLocaleString('es-UY')) + ' — <strong>' + money(r.amount) + '</strong> · ' + esc(r.reason || '') + (r.order_id ? ' (pedido #' + r.order_id + ')' : '') + '</p></div>';
   }).join('') : '<p>Sin movimientos.</p>');
   contentEl.innerHTML = html;
+}
+
+async function saveStage2() {
+  var body = {
+    phone: document.getElementById('s2-phone').value.trim(),
+    vehicle: document.getElementById('s2-vehicle').value,
+    monotributo_rut: document.getElementById('s2-rut').value.trim(),
+    razon_social: document.getElementById('s2-razon').value.trim(),
+    nombre_fantasia: document.getElementById('s2-fantasia').value.trim(),
+    domicilio_fiscal: document.getElementById('s2-domicilio').value.trim(),
+    actividad: document.getElementById('s2-actividad').value.trim(),
+    fecha_inicio_actividades: document.getElementById('s2-fecha').value,
+    telefono_empresa: document.getElementById('s2-tel-emp').value.trim(),
+    email_empresa: document.getElementById('s2-email-emp').value.trim(),
+    numero_bps: document.getElementById('s2-bps').value.trim(),
+    pos_provider: document.getElementById('s2-pos-prov').value.trim(),
+    pos_terminal: document.getElementById('s2-pos-term').value.trim(),
+  };
+  try {
+    var updated = await api('/api/users?me=1', 'PUT', body);
+    if (updated.stage2_complete) {
+      showMessage('¡Datos completos! Ya podés ponerte en línea.', 'ok');
+    } else {
+      showMessage('Datos guardados. Todavía falta: ' + (updated.stage2_missing || []).join(', '), 'error');
+    }
+    renderTab();
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
+}
+
+async function saveRadius() {
+  var v = Math.floor(Number(document.getElementById('s2-radius').value));
+  if (!Number.isFinite(v) || v < 1 || v > 200) {
+    showMessage('El radio debe ser entre 1 y 200 km.', 'error');
+    return;
+  }
+  try {
+    await api('/api/users?me=1', 'PUT', { work_radius_km: v });
+    showMessage('Radio de trabajo guardado: ' + v + ' km.', 'ok');
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
 }
 
 // ---- PIN propio ----
@@ -921,6 +1473,71 @@ async function changePin() {
   try {
     await api('/api/auth?action=change-pin', 'POST', { new_pin: pin });
     showMessage('PIN cambiado.', 'ok');
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
+}
+
+// ---- Google (clientes) ----
+function saveCustomerSession(data) {
+  token = data.token;
+  user = {
+    id: data.customer.id,
+    name: data.customer.full_name,
+    role: 'customer',
+    email: data.customer.email,
+    phone: data.customer.phone,
+    default_address: data.customer.default_address,
+    profile_complete: data.customer.profile_complete,
+  };
+  localStorage.setItem('du_token', token);
+  localStorage.setItem('du_user', JSON.stringify(user));
+  currentTab = 'customer-account';
+  showApp();
+  if (!data.customer.profile_complete) {
+    showMessage('Completá tu cédula, teléfono y dirección en Mi cuenta para poder pedir.', 'error');
+  }
+}
+
+async function initGoogleButtons() {
+  if (!googleClientId) {
+    try {
+      var s = await api('/api/stores?settings=public');
+      googleClientId = s.google_client_id || '';
+      driverPct = Number(s.driver_pct || 0);
+    } catch (e) { /* sin Google: se sigue con email y contraseña */ }
+  }
+  if (!googleClientId) return;
+  var regBox = document.getElementById('google-register-box');
+  var loginBox = document.getElementById('google-login-box');
+  if (regBox) regBox.classList.remove('hidden');
+  if (loginBox) loginBox.classList.remove('hidden');
+  if (window.google && window.google.accounts) { renderGoogleButtons(); return; }
+  if (googleScriptLoading) return;
+  googleScriptLoading = true;
+  var script = document.createElement('script');
+  script.src = 'https://accounts.google.com/gsi/client';
+  script.async = true;
+  script.defer = true;
+  script.onload = renderGoogleButtons;
+  document.head.appendChild(script);
+}
+
+function renderGoogleButtons() {
+  if (!window.google || !window.google.accounts || !googleClientId) return;
+  try {
+    window.google.accounts.id.initialize({ client_id: googleClientId, callback: handleGoogleCredential });
+    var regEl = document.getElementById('google-register-btn');
+    var loginEl = document.getElementById('google-login-btn');
+    if (regEl) { regEl.innerHTML = ''; window.google.accounts.id.renderButton(regEl, { theme: 'outline', size: 'large', width: 320 }); }
+    if (loginEl) { loginEl.innerHTML = ''; window.google.accounts.id.renderButton(loginEl, { theme: 'outline', size: 'large', width: 320 }); }
+  } catch (e) { /* Google no disponible: se sigue con email y contraseña */ }
+}
+
+async function handleGoogleCredential(response) {
+  try {
+    var data = await api('/api/auth?customer=google', 'POST', { id_token: response.credential });
+    saveCustomerSession(data);
   } catch (e) {
     showMessage(e.message, 'error');
   }
@@ -979,14 +1596,78 @@ document.getElementById('register-form').addEventListener('submit', async functi
   };
   if (role === 'delivery') {
     body.vehicle = document.getElementById('reg-vehicle').value;
-    body.monotributo_rut = document.getElementById('reg-rut').value.trim();
-    body.pos_provider = document.getElementById('reg-pos-provider').value.trim();
-    body.pos_terminal = document.getElementById('reg-pos-terminal').value.trim();
   }
   try {
     await api('/api/users', 'POST', body);
-    okEl.textContent = '¡Cuenta creada! Ahora ingresá con tu nombre y PIN.';
+    okEl.textContent = role === 'delivery'
+      ? '¡Cuenta creada! Ahora ingresá con tu nombre y PIN, y desde tu perfil completá los datos de tu empresa y tu POS para poder ponerte en línea.'
+      : '¡Cuenta creada! Ahora ingresá con tu nombre y PIN.';
     okEl.classList.remove('hidden');
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  }
+});
+
+document.getElementById('customer-register-form').addEventListener('submit', async function (ev) {
+  ev.preventDefault();
+  var errEl = document.getElementById('customer-register-error');
+  var okEl = document.getElementById('customer-register-ok');
+  errEl.classList.add('hidden');
+  okEl.classList.add('hidden');
+  if (!validateCI(document.getElementById('cust-reg-ci').value.trim())) {
+    errEl.textContent = 'La cédula no es válida (8 dígitos con dígito verificador).';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  try {
+    await api('/api/auth?customer=register', 'POST', {
+      full_name: document.getElementById('cust-reg-name').value.trim(),
+      ci: document.getElementById('cust-reg-ci').value.trim(),
+      email: document.getElementById('cust-reg-email').value.trim(),
+      phone: document.getElementById('cust-reg-phone').value.trim(),
+      default_address: document.getElementById('cust-reg-address').value.trim(),
+      password: document.getElementById('cust-reg-password').value,
+    });
+    okEl.textContent = '¡Cuenta creada! Ahora ingresá como cliente con tu email y contraseña.';
+    okEl.classList.remove('hidden');
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  }
+});
+
+document.getElementById('customer-login-form').addEventListener('submit', async function (ev) {
+  ev.preventDefault();
+  var errEl = document.getElementById('customer-login-error');
+  errEl.classList.add('hidden');
+  try {
+    var data = await api('/api/auth?customer=login', 'POST', {
+      email: document.getElementById('cust-login-email').value.trim(),
+      password: document.getElementById('cust-login-password').value,
+    });
+    saveCustomerSession(data);
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  }
+});
+
+document.getElementById('owner-login-form').addEventListener('submit', async function (ev) {
+  ev.preventDefault();
+  var errEl = document.getElementById('owner-login-error');
+  errEl.classList.add('hidden');
+  try {
+    var data = await api('/api/auth?owner=1', 'POST', {
+      name: document.getElementById('owner-name').value.trim(),
+      pin: document.getElementById('owner-pin').value,
+    });
+    token = data.token;
+    user = data.user;
+    localStorage.setItem('du_token', token);
+    localStorage.setItem('du_user', JSON.stringify(user));
+    currentTab = null;
+    showApp();
   } catch (e) {
     errEl.textContent = e.message;
     errEl.classList.remove('hidden');
@@ -1002,13 +1683,29 @@ window.acceptOrder = acceptOrder;
 window.doPickup = doPickup;
 window.doDeliver = doDeliver;
 window.changePin = changePin;
+window.openChecklist = openChecklist;
+window.setItemStatus = setItemStatus;
+window.cancelAllOutOfStock = cancelAllOutOfStock;
+window.markStoreReady = markStoreReady;
+window.restockProduct = restockProduct;
+window.saveStage2 = saveStage2;
+window.goToProfile = goToProfile;
+window.toggleCustomerActive = toggleCustomerActive;
+window.loadReports = loadReports;
+window.saveCustomerAccount = saveCustomerAccount;
 
-// Arranque: sesión guardada, seguimiento por URL (?pedido=ID) o inicio.
+// Arranque: sesión guardada, acceso dueño (?dueno=1), seguimiento por URL
+// (?pedido=ID) o inicio.
 (function init() {
   var params = new URLSearchParams(window.location.search);
   var pedido = params.get('pedido');
+  var dueno = params.get('dueno');
   if (token && user) {
     showApp();
+    return;
+  }
+  if (dueno === '1') {
+    showView('owner-login');
     return;
   }
   if (pedido) {

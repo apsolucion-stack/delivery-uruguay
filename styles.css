@@ -1,39 +1,160 @@
+/* Delivery Uruguay — diseño limpio, mobile-first.
+   Un solo acento fuerte (naranja delivery) + colores de estado consistentes.
+   Sin modo oscuro, sin animaciones pesadas. */
 * { box-sizing: border-box; }
-body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f7f7f7; color: #222; }
-header { background: #111; color: #fff; padding: 16px; }
-header h1 { margin: 0 0 4px 0; font-size: 24px; }
-header .tagline { margin: 0; color: #ccc; }
-main { max-width: 860px; margin: 0 auto; padding: 16px; }
-h2 { margin-top: 8px; }
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  margin: 0;
+  background: #faf7f2;
+  color: #1f2937;
+  line-height: 1.5;
+}
+header { background: #1f2937; color: #fff; padding: 18px 16px; }
+header h1 { margin: 0 0 4px 0; font-size: 24px; letter-spacing: -0.02em; }
+header .tagline { margin: 0; color: #d1d5db; font-size: 14px; }
+main { max-width: 860px; margin: 0 auto; padding: 20px 16px 40px 16px; }
+h2 { margin: 8px 0 12px 0; font-size: 22px; letter-spacing: -0.01em; }
+h3 { margin: 0 0 8px 0; font-size: 18px; }
+h4 { margin: 14px 0 4px 0; font-size: 16px; }
+p { margin: 6px 0; }
 .hidden { display: none !important; }
-button { background: #111; color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; cursor: pointer; font-size: 15px; margin: 4px 4px 4px 0; }
-button.secondary { background: #ddd; color: #222; }
-button.big { font-size: 18px; padding: 14px 22px; width: 100%; }
-button.online { background: #1a7f37; }
-button.offline { background: #999; }
-button:disabled { opacity: 0.5; }
-input, select, textarea { width: 100%; padding: 10px; margin: 4px 0 12px 0; border: 1px solid #ccc; border-radius: 8px; font-size: 15px; background: #fff; }
-label { display: block; font-weight: 600; margin-top: 8px; }
-.card { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 14px; margin: 10px 0; }
-.card img.product-photo { width: 100%; max-height: 220px; object-fit: cover; border-radius: 8px; }
+
+/* Botones: primarios grandes, ancho completo, alto táctil */
+button {
+  background: #ea580c;
+  color: #fff;
+  border: 0;
+  border-radius: 12px;
+  padding: 12px 18px;
+  min-height: 44px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  margin: 4px 4px 4px 0;
+}
+button:hover { background: #c2410c; }
+button.secondary { background: #e5e7eb; color: #1f2937; }
+button.secondary:hover { background: #d1d5db; }
+button.big { font-size: 18px; padding: 14px 22px; width: 100%; margin: 10px 0; }
+button.online { background: #15803d; }
+button.online:hover { background: #166534; }
+button.offline { background: #6b7280; }
+button.offline:hover { background: #4b5563; }
+button:disabled { opacity: 0.5; cursor: default; }
+
+input, select, textarea {
+  width: 100%;
+  padding: 12px;
+  margin: 4px 0 12px 0;
+  border: 1px solid #d1d5db;
+  border-radius: 12px;
+  font-size: 16px;
+  background: #fff;
+  color: #1f2937;
+}
+input:focus, select:focus, textarea:focus { outline: 2px solid #ea580c; border-color: #ea580c; }
+label { display: block; font-weight: 600; margin-top: 10px; }
+
+/* Tarjetas */
+.card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 16px;
+  margin: 12px 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+.card img.product-photo { width: 100%; max-height: 220px; object-fit: cover; border-radius: 12px; margin-bottom: 8px; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.error { color: #b00020; font-weight: 600; }
-.ok { color: #1a7f37; font-weight: 600; }
-.hint { color: #555; font-size: 14px; }
-.warning { background: #fff3cd; border: 1px solid #ffda6a; border-radius: 8px; padding: 10px; }
-.status { display: inline-block; background: #eee; border-radius: 20px; padding: 4px 12px; font-weight: 600; }
-.status.entregado { background: #d3f8d3; }
-.status.cancelado { background: #f8d3d3; }
-.status.retirado { background: #d3e8f8; }
+
+/* Hero de la página principal */
+.hero { padding: 12px 0 8px 0; }
+.hero-title { font-size: 40px; line-height: 1.1; margin: 8px 0 10px 0; letter-spacing: -0.03em; color: #111827; }
+.hero-subtitle { font-size: 19px; line-height: 1.4; color: #374151; margin: 0 0 8px 0; }
+.hero-support { font-size: 16px; color: #6b7280; margin: 0 0 16px 0; }
+.action-grid { display: grid; grid-template-columns: 1fr; gap: 10px; margin: 14px 0; }
+.action-card {
+  background: #fff;
+  color: #1f2937;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  text-align: left;
+  width: 100%;
+  margin: 0;
+  padding: 14px 16px;
+}
+.action-card:hover { background: #fff7ed; border-color: #ea580c; color: #9a3412; }
+.benefits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 8px 0;
+}
+.benefits span {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  color: #9a3412;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.home-secondary { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 16px; }
+.link-button {
+  background: none;
+  color: #ea580c;
+  padding: 8px 0;
+  min-height: 44px;
+  margin: 0;
+  font-size: 14px;
+}
+.link-button:hover { background: none; color: #9a3412; text-decoration: underline; }
+
+/* Avisos y estados */
+.error { color: #b91c1c; font-weight: 600; }
+.ok { color: #15803d; font-weight: 600; }
+.hint { color: #6b7280; font-size: 14px; }
+.warning { background: #fef3c7; border: 1px solid #fcd34d; border-radius: 12px; padding: 12px; }
+.notice { background: #fff7ed; border: 1px solid #fdba74; border-radius: 16px; padding: 16px; margin: 12px 0; }
+.notice-card { border-color: #fdba74; }
+.status { display: inline-block; background: #e2e8f0; color: #334155; border-radius: 999px; padding: 4px 12px; font-weight: 600; font-size: 13px; }
+.status.disponible { background: #e2e8f0; color: #334155; }
+.status.aceptado { background: #ffedd5; color: #9a3412; }
+.status.retirado { background: #ede9fe; color: #5b21b6; }
+.status.entregado { background: #dcfce7; color: #166534; }
+.status.cancelado { background: #fee2e2; color: #991b1b; }
+.badge { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700; }
+.badge-disponible { background: #e2e8f0; color: #334155; }
+.badge-entregado { background: #dcfce7; color: #166534; }
+.badge-cancelado { background: #fee2e2; color: #991b1b; }
+
+/* Total destacado en el checkout y el seguimiento */
+#order-breakdown {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 16px;
+  padding: 16px;
+  margin: 12px 0;
+}
+#order-breakdown p { font-size: 16px; }
+#order-breakdown strong { font-size: 19px; color: #9a3412; }
+
 #tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-#tabs button.active { background: #1a7f37; }
+#tabs button { background: #e5e7eb; color: #1f2937; }
+#tabs button:hover { background: #d1d5db; }
+#tabs button.active { background: #ea580c; color: #fff; }
 .qty { display: flex; align-items: center; gap: 8px; }
-.qty button { padding: 6px 12px; }
+.qty button { padding: 6px 12px; min-height: 36px; }
 .qty span { min-width: 24px; text-align: center; font-weight: 700; }
 table { width: 100%; border-collapse: collapse; }
-td, th { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
-.stars button { background: none; color: #f5a623; font-size: 28px; padding: 2px; margin: 0; }
+td, th { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; }
+.stars button { background: none; color: #ea580c; font-size: 28px; padding: 2px; margin: 0; min-height: auto; }
+@media (min-width: 600px) {
+  .action-grid { grid-template-columns: repeat(3, 1fr); }
+  .hero-title { font-size: 48px; }
+}
 @media (max-width: 600px) {
   header h1 { font-size: 20px; }
   button.big { font-size: 17px; }
+  .hero-title { font-size: 34px; }
 }
