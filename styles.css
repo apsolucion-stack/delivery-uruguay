@@ -1,0 +1,39 @@
+* { box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f7f7f7; color: #222; }
+header { background: #111; color: #fff; padding: 16px; }
+header h1 { margin: 0 0 4px 0; font-size: 24px; }
+header .tagline { margin: 0; color: #ccc; }
+main { max-width: 860px; margin: 0 auto; padding: 16px; }
+h2 { margin-top: 8px; }
+.hidden { display: none !important; }
+button { background: #111; color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; cursor: pointer; font-size: 15px; margin: 4px 4px 4px 0; }
+button.secondary { background: #ddd; color: #222; }
+button.big { font-size: 18px; padding: 14px 22px; width: 100%; }
+button.online { background: #1a7f37; }
+button.offline { background: #999; }
+button:disabled { opacity: 0.5; }
+input, select, textarea { width: 100%; padding: 10px; margin: 4px 0 12px 0; border: 1px solid #ccc; border-radius: 8px; font-size: 15px; background: #fff; }
+label { display: block; font-weight: 600; margin-top: 8px; }
+.card { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 14px; margin: 10px 0; }
+.card img.product-photo { width: 100%; max-height: 220px; object-fit: cover; border-radius: 8px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.error { color: #b00020; font-weight: 600; }
+.ok { color: #1a7f37; font-weight: 600; }
+.hint { color: #555; font-size: 14px; }
+.warning { background: #fff3cd; border: 1px solid #ffda6a; border-radius: 8px; padding: 10px; }
+.status { display: inline-block; background: #eee; border-radius: 20px; padding: 4px 12px; font-weight: 600; }
+.status.entregado { background: #d3f8d3; }
+.status.cancelado { background: #f8d3d3; }
+.status.retirado { background: #d3e8f8; }
+#tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+#tabs button.active { background: #1a7f37; }
+.qty { display: flex; align-items: center; gap: 8px; }
+.qty button { padding: 6px 12px; }
+.qty span { min-width: 24px; text-align: center; font-weight: 700; }
+table { width: 100%; border-collapse: collapse; }
+td, th { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
+.stars button { background: none; color: #f5a623; font-size: 28px; padding: 2px; margin: 0; }
+@media (max-width: 600px) {
+  header h1 { font-size: 20px; }
+  button.big { font-size: 17px; }
+}

@@ -1,0 +1,1 @@
+{"dependencies":{"pg":"^8.13.0"},"description":"Delivery Uruguay: marketplace de entregas para supermercados, almacenes y mercadería en general. Delivery con monotributo y POS, pedidos estilo Uber, calificaciones y saldos de plataforma.","name":"delivery-uruguay","private":true,"version":"1.0.0"}

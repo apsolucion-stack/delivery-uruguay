@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delivery Uruguay</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>🚚 Delivery Uruguay</h1>
+  <p class="tagline">Supermercados, almacenes y mercadería — no comida pronta</p>
+  <div id="user-bar" class="hidden">
+    <span id="user-name"></span>
+    <button id="logout-btn" type="button">Salir</button>
+  </div>
+</header>
+
+<main>
+  <p id="message"></p>
+
+  <!-- Vista pública principal -->
+  <section id="home-view">
+    <h2>Pedí lo que necesites, a cualquier hora</h2>
+    <p>Si hay un comercio abierto a las 2 de la mañana y estás en una fiesta, pedís bebida, limones o lo que sea desde acá. Un delivery activo lo acepta, paga en el comercio y te lo lleva. Le pagás directo al delivery cuando lo recibís.</p>
+    <div class="actions">
+      <button type="button" data-nav="stores">Ver comercios abiertos y pedir</button>
+      <button type="button" data-nav="track">Seguir mi pedido</button>
+      <button type="button" data-nav="login">Ingresar (comercio / delivery / admin)</button>
+      <button type="button" data-nav="register">Registrarme</button>
+    </div>
+  </section>
+
+  <!-- Comercios abiertos -->
+  <section id="stores-view" class="hidden">
+    <h2>Comercios abiertos ahora</h2>
+    <p id="stores-meta"></p>
+    <div id="stores-list"></div>
+    <p><button type="button" data-nav="home">Volver</button></p>
+  </section>
+
+  <!-- Catálogo y armado del pedido -->
+  <section id="catalog-view" class="hidden">
+    <div id="catalog-header"></div>
+    <div id="catalog-list"></div>
+    <h3>Tu pedido</h3>
+    <div id="cart-box"></div>
+    <label>Otros (texto libre, opcional)
+      <input id="otros-text" type="text" placeholder="Ej.: limones, hielo, lo que no está en el catálogo">
+    </label>
+    <label>Valor estimado de "otros" ($U, opcional)
+      <input id="otros-value" type="number" min="0" step="0.01" placeholder="0">
+    </label>
+    <div id="order-breakdown"></div>
+    <h3>Tus datos</h3>
+    <label>Nombre <input id="cust-name" type="text" required></label>
+    <label>Teléfono <input id="cust-phone" type="text" required></label>
+    <label>Dirección de entrega <input id="cust-address" type="text" required></label>
+    <p><button id="create-order-btn" type="button" class="big">Hacer pedido</button></p>
+    <div id="order-created"></div>
+    <p><button type="button" data-nav="stores">Volver a comercios</button></p>
+  </section>
+
+  <!-- Seguimiento público -->
+  <section id="track-view" class="hidden">
+    <h2>Seguir mi pedido</h2>
+    <label>Número de pedido <input id="track-id" type="number" min="1"></label>
+    <p><button id="track-btn" type="button">Buscar</button></p>
+    <div id="track-result"></div>
+    <p><button type="button" data-nav="home">Volver</button></p>
+  </section>
+
+  <!-- Ingreso -->
+  <section id="login-view" class="hidden">
+    <h2>Ingresar</h2>
+    <p>Solo con PIN, sin email.</p>
+    <form id="login-form">
+      <label>Soy
+        <select id="login-role" required>
+          <option value="delivery">Delivery</option>
+          <option value="comercio">Comercio</option>
+          <option value="admin">Admin</option>
+        </select>
+      </label>
+      <label>Nombre <input id="login-name" type="text" required></label>
+      <label>PIN <input id="login-pin" type="password" inputmode="numeric" required></label>
+      <button type="submit">Entrar</button>
+    </form>
+    <p id="login-error" class="error hidden"></p>
+    <p><button type="button" data-nav="register">No tengo cuenta: registrarme</button></p>
+    <p><button type="button" data-nav="home">Volver</button></p>
+  </section>
+
+  <!-- Registro -->
+  <section id="register-view" class="hidden">
+    <h2>Registrarme</h2>
+    <form id="register-form">
+      <label>Soy
+        <select id="reg-role" required>
+          <option value="delivery">Delivery</option>
+          <option value="comercio">Comercio</option>
+        </select>
+      </label>
+      <label>Nombre <input id="reg-name" type="text" required></label>
+      <label>Teléfono <input id="reg-phone" type="text" required></label>
+      <label>PIN (mínimo 4 caracteres) <input id="reg-pin" type="password" inputmode="numeric" required></label>
+      <div id="delivery-fields">
+        <label>Vehículo
+          <select id="reg-vehicle">
+            <option value="moto">Moto</option>
+            <option value="bici">Bici</option>
+            <option value="auto">Auto</option>
+          </select>
+        </label>
+        <label>RUT de monotributo <input id="reg-rut" type="text"></label>
+        <label>Proveedor de POS <input id="reg-pos-provider" type="text" placeholder="Ej.: Mercado Pago Point, Geocom, Fiserv"></label>
+        <label>Terminal POS <input id="reg-pos-terminal" type="text" placeholder="N° de terminal o identificador"></label>
+        <p class="hint">Para trabajar como delivery tenés que tener POS: los pagos con tarjeta van a tu propia cuenta a través de tu POS, vinculado a tu empresa monotributo. Sin datos de POS no se puede completar el registro ni ponerse en línea.</p>
+      </div>
+      <button type="submit">Crear cuenta</button>
+    </form>
+    <p id="register-error" class="error hidden"></p>
+    <p id="register-ok" class="ok hidden"></p>
+    <p><button type="button" data-nav="login">Ya tengo cuenta: ingresar</button></p>
+    <p><button type="button" data-nav="home">Volver</button></p>
+  </section>
+
+  <!-- App con login -->
+  <section id="app-view" class="hidden">
+    <div id="tabs"></div>
+    <div id="content"></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
