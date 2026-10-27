@@ -93,7 +93,8 @@ function fmtKm(km) {
 }
 
 // Geolocalización del navegador: NUNCA rechaza; null = sin permiso, sin
-// soporte o error. El flujo sigue igual (sin filtrar, mostrando todo).
+// soporte o error. Cliente y delivery la necesitan para ver comercios y
+// pedidos (sin ubicación, esas vistas se bloquean); el comercio está exento.
 function getPosition() {
   return new Promise(function (resolve) {
     if (!navigator.geolocation) { resolve(null); return; }
@@ -108,6 +109,8 @@ function getPosition() {
 // en la base: se mandan solo como parámetros de cada consulta.
 var customerLoc = null;
 var driverLoc = null;
+var customerLocDenied = false;
+var driverLocDenied = false;
 
 function showMessage(text, kind) {
   messageEl.textContent = text || '';
@@ -257,6 +260,14 @@ function montevideoTimeText() {
 async function loadOpenStores() {
   var listEl = document.getElementById('stores-list');
   var metaEl = document.getElementById('stores-meta');
+  if (!customerLoc) {
+    metaEl.innerHTML = '';
+    listEl.innerHTML = '<div class="card"><h3>Activá la ubicación para ver los comercios</h3>' +
+      '<p>Activá la ubicación de tu dispositivo para ver los comercios cercanos y pedir.</p>' +
+      (customerLocDenied ? '<p>Si negaste el permiso, habilitalo para este sitio en tu navegador: tocá el ícono de candado en la barra de direcciones → Permisos del sitio → Ubicación → Permitir, y reintentá.</p>' : '') +
+      '<button type="button" class="big" onclick="useCustomerLocation()">Activar ubicación</button></div>';
+    return;
+  }
   listEl.innerHTML = 'Cargando…';
   try {
     var settings = await api('/api/stores?settings=public');
@@ -291,9 +302,12 @@ async function loadOpenStores() {
 async function useCustomerLocation() {
   var pos = await getPosition();
   if (!pos) {
-    showMessage('No se pudo obtener tu ubicación (permiso negado o sin GPS). Se muestran todos los comercios.', 'error');
+    customerLocDenied = true;
+    showMessage('No se pudo obtener tu ubicación. Si negaste el permiso, habilitalo en tu navegador y reintentá.', 'error');
+    loadOpenStores();
     return;
   }
+  customerLocDenied = false;
   customerLoc = pos;
   showMessage('Ubicación activa: comercios ordenados del más cercano.', 'ok');
   loadOpenStores();
@@ -302,9 +316,12 @@ async function useCustomerLocation() {
 async function useDriverLocation() {
   var pos = await getPosition();
   if (!pos) {
-    showMessage('No se pudo obtener tu ubicación (permiso negado o sin GPS). Se muestran todos los pedidos.', 'error');
+    driverLocDenied = true;
+    showMessage('No se pudo obtener tu ubicación. Si negaste el permiso, habilitalo en tu navegador y reintentá.', 'error');
+    renderTab();
     return;
   }
+  driverLocDenied = false;
   driverLoc = pos;
   showMessage('Ubicación activa: solo ves pedidos dentro de tu radio.', 'ok');
   renderTab();
@@ -334,7 +351,9 @@ async function openCatalog(storeId) {
     driverPct = Number(settings.driver_pct || 0);
     googleClientId = settings.google_client_id || '';
     var products = await api('/api/stores?products=1&store_id=' + encodeURIComponent(storeId));
-    var openStores = await api('/api/stores?open=1');
+    var openStoresUrl = '/api/stores?open=1';
+    if (customerLoc) openStoresUrl += '&lat=' + encodeURIComponent(customerLoc.lat) + '&lng=' + encodeURIComponent(customerLoc.lng);
+    var openStores = await api(openStoresUrl);
     var storeWithRating = openStores.find(function (s) { return s.id === store.id; });
     currentStore = store;
     currentCatalog = products;
@@ -1141,14 +1160,19 @@ async function renderAvailable() {
     return;
   }
   var radius = me.work_radius_km !== undefined && me.work_radius_km !== null ? me.work_radius_km : 30;
+  if (!driverLoc) {
+    contentEl.innerHTML = '<div class="card"><h3>Activá la ubicación para ver los pedidos</h3>' +
+      '<p>Activá la ubicación de tu dispositivo para ver los pedidos dentro de tu radio de trabajo (' + esc(radius) + ' km).</p>' +
+      (driverLocDenied ? '<p>Si negaste el permiso, habilitalo para este sitio en tu navegador: tocá el ícono de candado en la barra de direcciones → Permisos del sitio → Ubicación → Permitir, y reintentá.</p>' : '') +
+      '<button type="button" class="big" onclick="useDriverLocation()">Activar ubicación</button></div>';
+    return;
+  }
   var url = '/api/orders?available=1';
-  if (driverLoc) url += '&lat=' + encodeURIComponent(driverLoc.lat) + '&lng=' + encodeURIComponent(driverLoc.lng);
+  url += '&lat=' + encodeURIComponent(driverLoc.lat) + '&lng=' + encodeURIComponent(driverLoc.lng);
   var orders = await api(url);
   var head = '<div class="card"><h3>Pedidos disponibles</h3>' +
     '<p>Tu radio de trabajo: <strong>' + esc(radius) + ' km</strong> (se cambia en "Mi perfil").</p>' +
-    (driverLoc
-      ? '<p>Ubicación activa: solo ves pedidos de comercios a menos de ' + esc(radius) + ' km. <button type="button" class="secondary" onclick="useDriverLocation()">Actualizar mi ubicación</button></p>'
-      : '<p>Sin ubicación: se muestran todos los pedidos. <button type="button" onclick="useDriverLocation()">Usar mi ubicación para filtrar por radio</button></p>') +
+    '<p>Ubicación activa: solo ves pedidos de comercios a menos de ' + esc(radius) + ' km. <button type="button" class="secondary" onclick="useDriverLocation()">Actualizar mi ubicación</button></p>' +
     '</div>';
   if (!orders.length) { contentEl.innerHTML = head + '<p>No hay pedidos disponibles ahora mismo.</p>'; return; }
   contentEl.innerHTML = head + orders.map(function (o) {
@@ -1161,7 +1185,13 @@ async function renderAvailable() {
 
 async function acceptOrder(orderId) {
   try {
-    await api('/api/orders?id=' + encodeURIComponent(orderId), 'PUT', { action: 'accept' });
+    var pos = await getPosition();
+    if (!pos) {
+      showMessage('Activá la ubicación para aceptar. Si negaste el permiso, habilitalo en tu navegador y reintentá.', 'error');
+      return;
+    }
+    driverLoc = pos;
+    await api('/api/orders?id=' + encodeURIComponent(orderId), 'PUT', { action: 'accept', lat: pos.lat, lng: pos.lng });
     showMessage('Pedido aceptado. Andá al comercio, pagá y tocá "Ya tengo la orden".', 'ok');
     currentTab = 'my-deliveries';
     buildTabs();
