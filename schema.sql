@@ -15,9 +15,11 @@ CREATE TABLE IF NOT EXISTS users (
   pos_provider TEXT,
   pos_terminal TEXT,
   online BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (role, LOWER(name))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS users_role_name_unique
+    ON users (role, LOWER(name));
 
 CREATE TABLE IF NOT EXISTS stores (
   id SERIAL PRIMARY KEY,
